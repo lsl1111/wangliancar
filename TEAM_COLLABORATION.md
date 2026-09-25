@@ -236,3 +236,24 @@ E:\Sim-One\Tools\python36\python.exe -m unittest discover -s tests -v
 2. 不绕过接口直接调用其他成员内部代码。
 3. 不在控制模块通过联调前开启 `send_control=true`。
 
+## 11. 使用 Agent/Codex 协作
+
+全队公共约定保存在根目录 [AGENTS.md](AGENTS.md)。各成员在自己的工作目录维护局部约束：
+
+| 工作 | 局部规则 |
+|---|---|
+| 队长感知 | [perception/AGENTS.md](perception/AGENTS.md) |
+| 决策 | [members/decision/AGENTS.md](members/decision/AGENTS.md) |
+| 路径与轨迹规划 | [members/planning/AGENTS.md](members/planning/AGENTS.md) |
+| 控制 | [members/control/AGENTS.md](members/control/AGENTS.md) |
+
+感知保留在现有 `perception/`；三个成员的 `*_stub.py` 保留原位置和函数接口。局部 AGENTS 的自然作用域是所在目录及其子目录，不包含同级 stub。根 AGENTS 因此要求：无论从哪个目录启动任务，修改某模块的 stub、实现或测试前，都额外阅读对应局部规则。
+
+Codex 启动时按仓库根目录到工作目录读取指令链；从成员目录启动可直接带入该目录规则，从仓库根目录启动则依上面的明确读取要求补充。规则更新后，在对应目录启动新任务以加载新规则。各成员可独立维护自己的局部规则；个人临时偏好在任务中说明，不覆盖队友约束。AGENTS 是 Agent 行为约定，不是文件权限隔离。
+
+规划 Skill 安装于 [.agents/skills/path-planning/SKILL.md](.agents/skills/path-planning/SKILL.md)。在该仓库任务中写“使用 `$path-planning` 设计/评审轨迹规划”可显式触发，也可按任务匹配自动选择。项目根目录的 `.agents/skills` 对仓库内子目录可发现；新安装的 Skill 从后续轮次使用，若未显示可重新打开任务/重启 Codex。此 Skill 已按项目做依赖和职责适配，来源与差异见其 `SOURCE.md`。
+
+AGENTS 保存稳定规则，Skill 保存专业工作流；规划经验记录在 [members/planning/KNOWLEDGE.md](members/planning/KNOWLEDGE.md)，按证据维护，不把实验记录不断追加到根规则。既有私人资料是否跟踪由其原约定决定，新增协作文件不意味着可以一并提交所有未跟踪文件。
+
+作用域和发现机制参考 [Codex AGENTS 官方说明](https://learn.chatgpt.com/docs/agent-configuration/agents-md) 与 [Skill 官方说明](https://learn.chatgpt.com/docs/build-skills)。
+
