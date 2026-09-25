@@ -2,6 +2,8 @@
 
 这是四人方案中的“队长项目”。它不是整车算法，而是全队共同运行的底座：只在这里连接官方 SimOne API，把原始数据整理成统一接口，然后依次调用决策、规划和控制成员的模块。
 
+组员开始开发前，请先阅读 [四人协作开发说明](TEAM_COLLABORATION.md)。
+
 ## 当前已经做到
 
 - 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS、传感器目标；传感器不可用时回退到 Ground Truth。
@@ -52,4 +54,3 @@ E:\Sim-One\Tools\python36\python.exe main.py --once
 ## 开启车辆控制前必须完成
 
 控制成员需要让 `compute_control()` 返回 `valid=True` 的 `ControlOut`，全队联调确认油门、刹车和转向量纲后，再把 `config/default.ini` 中的 `send_control` 改为 `true`。当前占位控制始终无效，即使误开开关也不会发控制指令。
-
