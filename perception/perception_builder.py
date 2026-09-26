@@ -3,8 +3,21 @@
 import math
 
 from core.geometry import calculate_ttc, speed_2d, world_to_ego
-from core.interfaces import EgoState, Perception, Target
+from core.interfaces import EgoState, Perception, Target, TrafficControl
 from simone_platform.case_resolver import resolve_scene_id
+
+
+# ESimOne_TrafficLight_Status values returned by SoGetTrafficLights.
+_TRAFFIC_LIGHT_STATUS = {
+    0: "INVALID",
+    1: "RED",
+    2: "GREEN",
+    3: "YELLOW",
+    4: "RED_BLINK",
+    5: "GREEN_BLINK",
+    6: "YELLOW_BLINK",
+    7: "BLACK",
+}
 
 
 class PerceptionBuilder(object):
@@ -47,8 +60,45 @@ class PerceptionBuilder(object):
             if target.valid:
                 result.targets.append(target)
         result.targets.sort(key=lambda item: item.distance)
+        result.traffic = self._build_traffic(result.ego)
         result.valid = True
         return result
+
+    def _build_traffic(self, ego):
+        """Populate TrafficControl from the traffic lights the adapter exposes."""
+        traffic = TrafficControl()
+        if not ego.valid:
+            return traffic
+        try:
+            lights = self.adapter.read_traffic() or []
+        except Exception:
+            self._last_traffic_error = True
+            return traffic
+        signals = [light for light in lights if light.get("status", 0) != 0]
+        if not signals:
+            return traffic
+        signals.sort(
+            key=lambda light: (
+                math.hypot(float(light.get("x", ego.x)) - ego.x, float(light.get("y", ego.y)) - ego.y)
+            )
+        )
+        nearest = signals[0]
+        traffic.signal_state = _TRAFFIC_LIGHT_STATUS.get(int(nearest.get("status", 0)), "UNKNOWN")
+        distance = math.hypot(
+            float(nearest.get("x", ego.x)) - ego.x, float(nearest.get("y", ego.y)) - ego.y
+        )
+        traffic.signal_distance = distance
+        stop_line = self._stop_line_distance(nearest, distance)
+        traffic.stop_line_distance = stop_line
+        traffic.valid = True
+        return traffic
+
+    @staticmethod
+    def _stop_line_distance(nearest, signal_distance):
+        stop = nearest.get("stop_line_distance", -1.0)
+        if isinstance(stop, (int, float)) and float(stop) >= 0.0:
+            return float(stop)
+        return signal_distance
 
     @staticmethod
     def _build_ego(gps):

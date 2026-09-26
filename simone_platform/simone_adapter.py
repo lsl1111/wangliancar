@@ -164,6 +164,45 @@ class SimOneAdapter(object):
             "probability": float(probability),
         }
 
+    def read_traffic(self):
+        """Return traffic-light info for the main vehicle.
+
+        Uses the dynamic per-frame signal truth via SoGetTrafficLights, keyed by
+        the static light ids discovered from the HD map (getTrafficLightList).
+        Returns a list of dicts, one per currently relevant traffic light:
+          {opendrive_id, status, count_down, x, y}
+        When no light or map is available it returns [] (perception keeps the
+        TrafficControl fields at their UNKNOWN/invalid defaults).
+        """
+        lights = []
+        if not self.map_loaded or self.hdmap is None or not hasattr(self.hdmap, "getTrafficLightList"):
+            return lights
+        traffic_light_list = self.hdmap.getTrafficLightList()
+        count = int(traffic_light_list.Size()) if traffic_light_list else 0
+        for index in range(count):
+            light = traffic_light_list.GetElement(index)
+            opendrive_id = int(light.id)
+            native = self.structs.SimOne_Data_TrafficLight()
+            if not self.sensor_api.SoGetTrafficLights(
+                self.config.vehicle_id, opendrive_id, native
+            ):
+                continue
+            # The dynamic truth carries only status; the static light position
+            # comes from the HD map entry (MSignal.pt) so perception can rank
+            # lights by distance to the ego vehicle.
+            x = getattr(getattr(light, "pt", None), "x", None)
+            y = getattr(getattr(light, "pt", None), "y", None)
+            lights.append(
+                {
+                    "opendrive_id": opendrive_id,
+                    "status": int(native.status),
+                    "count_down": int(native.countDown),
+                    "x": float(x) if isinstance(x, (int, float)) else None,
+                    "y": float(y) if isinstance(y, (int, float)) else None,
+                }
+            )
+        return lights
+
     def get_driver_control(self):
         native = self.structs.SimOne_Data_Control()
         if not self.pnc_api.SoGetDriverControl(self.config.vehicle_id, native):
