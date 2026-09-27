@@ -39,6 +39,8 @@ SimOne API -> 队长 Perception -> 决策 DecisionTarget
 
 ## 运行方法
 
+按联调指导文件在平台“资源库 → 控制器”的 **启动脚本** 填写本机项目目录下 `scripts\StartCaptain.bat` 的绝对路径，在 **结束脚本** 填写 `scripts\KillCaptain.bat` 的绝对路径。这两个批处理脚本会启动/结束整个 `nevc_auto` 运行链，不需要把 `members/control/controller.py` 填进平台。平台更新控制器后按指导刷新本地端。
+
 1. 在 SimOne 中选择并启动案例。
 2. 双击 `scripts/StartCaptain.bat`。
 3. 日志在 `runtime_data/captain.log`；感知和整条链的最新快照分别在 `runtime_data/latest_perception.json`、`runtime_data/latest_pipeline.json`。
