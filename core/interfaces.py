@@ -246,6 +246,7 @@ class ControlOut(FrameOutput):
         self.hazard_signal = False
         self.valid = False
         self.source = ""
+        self.diagnostics = {}
 
     def clamp(self):
         values = (self.throttle, self.brake, self.steering)

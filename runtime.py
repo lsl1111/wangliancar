@@ -9,7 +9,7 @@ from core.serialization import perception_to_dict, to_dict
 from core.validation import validate_output
 from core.interfaces import DecisionTarget, Trajectory, ControlOut
 from core.safety_supervisor import SafetySupervisor
-from members.control_stub import compute_control
+from members.control_stub import compute_control, configure_control
 from members.decision_stub import decide
 from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
@@ -28,6 +28,7 @@ class CaptainRuntime(object):
         self.pipeline_path = os.path.join(config.runtime_dir, "latest_pipeline.json")
         self._warned_no_control = False
         self.safety = SafetySupervisor(config)
+        configure_control(config)
 
     def request_stop(self, unused_signal=None, unused_frame=None):
         self.stop_requested = True
@@ -86,7 +87,7 @@ class CaptainRuntime(object):
             except Exception as exc:
                 control = ControlOut().bind(trajectory)
                 control.errors.append("CONTROL_INVALID:" + type(exc).__name__ + ":" + str(exc))
-            safety = self.safety.evaluate(perception, decision, trajectory)
+            safety = self.safety.evaluate(perception, decision, trajectory, control)
             receipt = {"attempted": False, "ok": False, "reason": "observe_mode",
                        "safety_mode": safety.mode, "safety_reason": safety.reason,
                        "safety_candidate": safety.control is not None}
@@ -104,7 +105,9 @@ class CaptainRuntime(object):
                 else:
                     receipt["reason"] = "safety_observe_only"
             elif self.config.send_control:
-                if repeated:
+                if not getattr(self.config, "safety_brake_enabled", False):
+                    receipt["reason"] = "safety_brake_not_armed"
+                elif repeated:
                     receipt["reason"] = "gps_frame_repeated"
                 elif decision.valid and trajectory.valid and control.valid:
                     receipt["attempted"] = True

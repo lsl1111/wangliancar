@@ -37,6 +37,7 @@ class SafetySupervisor(object):
         self.recovery_frames = max(1, int(getattr(config, "safety_recovery_frames", 3)))
         self.controlled_brake = self._brake(getattr(config, "safety_controlled_brake", 0.3))
         self.emergency_brake = self._brake(getattr(config, "safety_emergency_brake", 1.0))
+        self.normal_control_required = bool(getattr(config, "send_control", False))
         self.last_case = None
         self.last_frame = None
         self.last_frame_at = None
@@ -94,7 +95,7 @@ class SafetySupervisor(object):
                 return False
         return True
 
-    def evaluate(self, perception, decision, trajectory):
+    def evaluate(self, perception, decision, trajectory, control=None):
         now = self.clock()
         case = (getattr(perception, "case_id", ""), getattr(perception, "case_name", ""))
         if self.last_case is not None and case != self.last_case:
@@ -141,6 +142,9 @@ class SafetySupervisor(object):
             mode, reason = "fault_stop", "trajectory_invalid_or_expired"
         elif trajectory.emergency_stop:
             mode, reason = "emergency_stop", "trajectory_emergency_request"
+        elif (self.normal_control_required and new_frame and control is not None
+              and not current(control, trajectory)):
+            mode, reason = "fault_stop", "controller_invalid_or_expired"
         # Independent IMU/radar/ultrasonic/environment errors are deliberately
         # absent from these gates. Only channels needed for this baseline stop it.
         if mode != "normal":

@@ -65,7 +65,7 @@ class FakeAdapter(object):
 
 class SafetyRuntimeTests(unittest.TestCase):
     def run_frames(self, frames, armed=True, send_control=True, decision_fn=decision,
-                   trajectory_fn=trajectory):
+                   trajectory_fn=trajectory, control_fn=controller):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(runtime_dir=directory, loop_hz=20,
                                      send_control=send_control, safety_brake_enabled=armed,
@@ -77,7 +77,7 @@ class SafetyRuntimeTests(unittest.TestCase):
             iterator = iter(frames)
             with patch("runtime.decide", side_effect=decision_fn), \
                  patch("runtime.plan", side_effect=trajectory_fn), \
-                 patch("runtime.compute_control", side_effect=controller), \
+                 patch("runtime.compute_control", side_effect=control_fn), \
                  patch.object(runtime, "_sleep_remaining", return_value=None):
                 runtime._loop(SimpleNamespace(build=lambda: next(iterator)), False)
             with open(os.path.join(directory, "latest_pipeline.json"),
@@ -126,6 +126,22 @@ class SafetyRuntimeTests(unittest.TestCase):
         self.assertEqual(0.2, sent[0][1])
         self.assertEqual("normal", pipeline["safety"]["mode"])
 
+    def test_normal_control_is_gated_by_armed_safety_exit(self):
+        sent, pipeline = self.run_frames([perception()], armed=False)
+        self.assertEqual([], sent)
+        self.assertEqual("safety_brake_not_armed", pipeline["send"]["reason"])
+
+    def test_one_repeated_frame_does_not_trigger_controller_fault_brake(self):
+        calls = [0]
+        def once(p, t):
+            calls[0] += 1
+            return controller(p, t) if calls[0] == 1 else ControlOut().bind(t)
+        p = perception()
+        sent, pipeline = self.run_frames([p, p], control_fn=once)
+        self.assertEqual(1, len(sent))
+        self.assertEqual("normal", pipeline["safety"]["mode"])
+        self.assertEqual("gps_frame_repeated", pipeline["send"]["reason"])
+
     def test_emergency_intent_overrides_normal_throttle(self):
         def emergency(p):
             d = decision(p)
@@ -141,6 +157,13 @@ class SafetyRuntimeTests(unittest.TestCase):
         sent, pipeline = self.run_frames([perception()], trajectory_fn=invalid_plan)
         self.assertEqual((0.0, 1.0), sent[0][1:3])
         self.assertEqual("trajectory_invalid_or_expired", pipeline["safety"]["reason"])
+
+    def test_invalid_controller_output_uses_fault_brake_when_armed(self):
+        def invalid_control(p, t):
+            return ControlOut().bind(t)
+        sent, pipeline = self.run_frames([perception()], control_fn=invalid_control)
+        self.assertEqual((0.0, 1.0), sent[0][1:3])
+        self.assertEqual("controller_invalid_or_expired", pipeline["safety"]["reason"])
 
     def test_gps_failure_uses_only_recent_trusted_header(self):
         first, second = perception(10), perception(11)

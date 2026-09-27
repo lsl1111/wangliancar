@@ -10,6 +10,7 @@ from unittest.mock import patch
 from core.interfaces import ControlOut, DecisionMode, DecisionTarget, LaneContext, Trajectory
 from core.serialization import perception_to_dict
 from members.decision_stub import decide
+from members.control_stub import compute_control, configure_control
 from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, _orient_forward
@@ -156,6 +157,21 @@ class DataChainTests(unittest.TestCase):
         self.assertEqual(0.0, emergency.target_speed)
         self.assertTrue(all(point.speed == 0.0 for point in emergency.points))
 
+    def test_scene_six_reaches_control_diagnostics_without_target_sensor(self):
+        raw = self.raw(x=50)
+        raw["targets_valid"] = False
+        raw["source_status"] = {"targets": {"read_ok": False,
+                                                "sensor_presence": "not_configured"}}
+        p = self.builder.build_from_raw(raw)
+        d = decide(p)
+        t = plan(p, d)
+        self.assertTrue(t.valid, t.errors)
+        configure_control(SimpleNamespace(control_calibrated=False))
+        control = compute_control(p, t)
+        self.assertFalse(control.valid)
+        self.assertIn("reference_speed_mps", control.diagnostics)
+        self.assertIn("vehicle calibration required", control.errors)
+
     def test_curved_lane_uses_local_direction_and_reverses_boundaries(self):
         points = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (-10, 10, 0)]
         self.assertEqual(points, _orient_forward(points, 0.0, 5, 0))
@@ -233,7 +249,8 @@ class DataChainTests(unittest.TestCase):
                 return True
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(runtime_dir=directory, loop_hz=20,
-                                     send_control=True, publish_json=True)
+                                     send_control=True, safety_brake_enabled=True,
+                                     publish_json=True)
             runtime = CaptainRuntime(config, SimpleNamespace(
                 info=lambda *args: None, warning=lambda *args: None))
             runtime.adapter = MockAdapter()
