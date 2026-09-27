@@ -5,8 +5,8 @@ from core.scene_requirements import requires_targets
 from core.validation import current
 
 
-# Provisional low-speed target for the lane-centering acceptance scene only.
-LANE_CENTERING_CRUISE_MPS = 2.0
+# Provisional low-speed target for the shared decision baseline.
+BASELINE_CRUISE_MPS = 2.0
 
 
 def decide(perception):
@@ -17,12 +17,9 @@ def decide(perception):
         output.reason = "perception invalid"
         return output
     output.mode = DecisionMode.KEEP_LANE
-    output.target_speed = (LANE_CENTERING_CRUISE_MPS if perception.scene_id == 6
-                           else perception.ego.speed)
+    output.target_speed = BASELINE_CRUISE_MPS
     output.target_lane_id = perception.lane.lane_id
-    output.reason = ("06 low-speed lane-centering target"
-                     if perception.scene_id == 6 else
-                     "integration baseline: hold current speed; no autonomous launch")
+    output.reason = "integration baseline: low-speed cruise target"
     output.valid = True
     target_status = perception.source_status.get("targets", {})
     targets_usable = (perception.targets_valid and

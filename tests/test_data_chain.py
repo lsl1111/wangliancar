@@ -177,6 +177,20 @@ class DataChainTests(unittest.TestCase):
         self.assertIn("reference_speed_mps", control.diagnostics)
         self.assertIn("vehicle calibration required", control.errors)
 
+    def test_shared_low_speed_target_requires_scene_inputs(self):
+        raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
+        p = self.builder.build_from_raw(raw)
+        p.scene_id = 4
+        self.assertEqual(2.0, decide(p).target_speed)
+        p.scene_id = 1
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decide(p).mode)
+        p.target_source = "sensor:perfectPerception1"
+        p.source_status["targets"]["usable"] = True
+        decision = decide(p)
+        self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
+        self.assertEqual(2.0, decision.target_speed)
+
     def test_scene_six_launch_yields_to_required_stop(self):
         raw = self.raw(x=50)
         raw["gps"]["vx"] = 0.0
