@@ -8,11 +8,13 @@ import unittest
 from types import SimpleNamespace
 
 from core.config import load_config
-from core.interfaces import Perception, Trajectory, TrajectoryPoint
+from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory, TrajectoryPoint
 from members.control.controller import ControlEngine
 from members.control.longitudinal import pedal_request
 from members.control.parameters import ControllerSettings, VehicleCalibration
+from members.control.trajectory import PreparedPath
 from members.control_stub import compute_control, configure_control
+from members.planning_stub import plan
 
 
 def calibration():
@@ -131,6 +133,68 @@ class ControlTests(unittest.TestCase):
         self.assertEqual("EMERGENCY", result.diagnostics["state"])
         self.assertEqual((0.0, 0.9, 0.0),
                          (result.throttle, result.brake, result.steering))
+
+    def test_stationary_stop_brakes_then_holds_without_forward_geometry(self):
+        stationary_points = [(5.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
+        p, t = inputs(speed=3, points=stationary_points)
+        t.stop_required, t.target_speed, t.stop_distance = True, 0.0, 0.0
+        stopping = self.engine.compute(p, t)
+        self.assertTrue(stopping.valid, stopping.errors)
+        self.assertEqual("STOPPING", stopping.diagnostics["state"])
+        self.assertEqual((0.0, 0.6, 0.0),
+                         (stopping.throttle, stopping.brake, stopping.steering))
+        self.assertEqual(0.0, stopping.diagnostics["reference_speed_mps"])
+        self.advance()
+        p, t = inputs(frame=2, speed=0, points=stationary_points)
+        t.stop_required, t.target_speed, t.stop_distance = True, 0.0, 0.0
+        holding = self.engine.compute(p, t)
+        self.assertTrue(holding.valid, holding.errors)
+        self.assertEqual("HOLD", holding.diagnostics["state"])
+        self.assertEqual((0.0, 0.2, 0.0),
+                         (holding.throttle, holding.brake, holding.steering))
+
+    def test_stationary_stop_requires_nearby_position_and_calibration(self):
+        points = [(20.0, 0.0, 0.0), (20.0, 0.0, 0.0)]
+        p, t = inputs(speed=0, points=points)
+        t.stop_required, t.target_speed = True, 0.0
+        result = self.engine.compute(p, t)
+        self.assertFalse(result.valid)
+        self.assertIn("too far", result.errors[0])
+        p, t = inputs(speed=0, points=[(5.0, 0.0, 0.0),
+                                      (5.0, 0.0, 0.0)])
+        t.stop_required, t.target_speed = True, 0.0
+        result = ControlEngine().compute(p, t)
+        self.assertFalse(result.valid)
+        self.assertIn("vehicle calibration required", result.errors)
+
+    def test_planner_stationary_stop_reaches_valid_control(self):
+        p, _ = inputs(speed=0)
+        p.lane.valid = True
+        p.lane.lane_id = "lane-1"
+        p.lane.lane_width = 3.5
+        p.lane.center_line = [(float(i), 0.0, 0.0) for i in range(81)]
+        decision = DecisionTarget().bind(p)
+        decision.valid = True
+        decision.mode = DecisionMode.STOP
+        decision.target_speed = 0.0
+        decision.target_lane_id = p.lane.lane_id
+        decision.stop_distance = 0.0
+        trajectory = plan(p, decision)
+        self.assertTrue(trajectory.valid, trajectory.errors)
+        self.assertFalse(trajectory.emergency_stop)
+        result = self.engine.compute(p, trajectory)
+        self.assertTrue(result.valid, result.errors)
+        self.assertEqual("HOLD", result.diagnostics["state"])
+        self.assertEqual(0.2, result.brake)
+
+    def test_duplicate_path_point_preserves_lower_speed_limit(self):
+        points = [(0.0, 0.0, 5.0), (1.0, 0.0, 5.0),
+                  (1.0, 0.0, 0.0), (2.0, 0.0, 5.0)]
+        p, t = inputs(speed=2, x=0, points=points)
+        path = PreparedPath(t.points, ControllerSettings().max_segment_m)
+        self.assertEqual(0.0, path.points[1][2])
+        reference, _ = path.speed_reference(0.0, t, ControllerSettings())
+        self.assertLess(reference, 5.0)
 
     def test_unconfigured_vehicle_has_diagnostics_but_no_valid_command(self):
         p, t = inputs()

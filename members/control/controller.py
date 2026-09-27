@@ -23,6 +23,15 @@ def _approach(previous, desired, amount):
     return max(previous - amount, min(previous + amount, desired))
 
 
+def _stationary_stop(trajectory):
+    if not trajectory.stop_required or trajectory.target_speed != 0:
+        return False
+    origin = trajectory.points[0]
+    return all(point.speed == 0 and
+               math.hypot(point.x - origin.x, point.y - origin.y) <= 1e-6
+               for point in trajectory.points)
+
+
 class ControlEngine(object):
     def __init__(self, calibration=None, settings=None, clock=None):
         self.calibration = calibration
@@ -41,6 +50,7 @@ class ControlEngine(object):
 
     def _invalid(self, output, reason):
         self.integral = 0.0
+        self.release_frames = 0
         self.last_output = None
         self.state = "FAULT_STOP"
         output.throttle = output.brake = output.steering = 0.0
@@ -87,12 +97,35 @@ class ControlEngine(object):
             output.diagnostics["dt_s"] = dt
             if trajectory.emergency_stop:
                 self.integral = 0.0
+                self.release_frames = 0
                 self.state = "EMERGENCY"
                 output.diagnostics["state"] = self.state
                 if self.calibration is None:
                     return self._invalid(output, "vehicle calibration required")
                 output.brake = self.calibration.emergency_brake
                 output.source = "control:EMERGENCY"
+                output.valid = True
+                output.clamp()
+                self.last_output = output
+                return output
+
+            if _stationary_stop(trajectory):
+                origin = trajectory.points[0]
+                if math.hypot(ego.x - origin.x, ego.y - origin.y) > self.settings.max_projection_error_m:
+                    raise ValueError("stationary stop is too far from vehicle")
+                if self.calibration is None:
+                    return self._invalid(output, "vehicle calibration required")
+                self.integral = 0.0
+                self.release_frames = 0
+                self.state = ("HOLD" if ego.speed <= self.settings.hold_speed_mps
+                              else "STOPPING")
+                output.brake = (self.calibration.hold_brake if self.state == "HOLD"
+                                else self.calibration.max_brake)
+                output.diagnostics.update({
+                    "reference_speed_mps": 0.0,
+                    "speed_error_mps": -ego.speed,
+                    "state": self.state})
+                output.source = "control:" + self.state
                 output.valid = True
                 output.clamp()
                 self.last_output = output

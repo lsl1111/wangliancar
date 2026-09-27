@@ -21,6 +21,9 @@ class PreparedPath(object):
                 previous = self.points[-1]
                 distance = math.hypot(x - previous[0], y - previous[1])
                 if distance <= 1e-6:
+                    # A repeated position may carry a lower speed limit.
+                    self.points[-1] = (previous[0], previous[1],
+                                       min(previous[2], float(speed)))
                     continue
                 if distance > max_segment_m:
                     raise ValueError("path segment gap exceeds bound")
