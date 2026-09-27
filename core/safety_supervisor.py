@@ -8,6 +8,7 @@ import math
 import time
 
 from core.interfaces import ControlOut, DecisionMode
+from core.scene_requirements import requires_targets
 from core.validation import current
 
 
@@ -65,6 +66,7 @@ class SafetySupervisor(object):
         statuses = getattr(perception, "source_status", {})
         target_status = statuses.get("targets", {}) if isinstance(statuses, dict) else {}
         if (not getattr(perception, "targets_valid", False)
+                or not getattr(perception, "target_source", "").startswith("sensor:")
                 or not isinstance(target_status, dict)
                 or target_status.get("usable") is not True):
             return False
@@ -123,13 +125,15 @@ class SafetySupervisor(object):
             mode, reason = "fault_stop", "gps_frame_stalled"
         elif self._imminent_collision(perception):
             mode, reason = "emergency_stop", "imminent_target_collision"
-        elif (not getattr(perception, "targets_valid", False)
-              or not isinstance(source_status.get("targets"), dict)
-              or source_status["targets"].get("usable") is not True
-              or not self._target_records_valid(perception)
-              or not getattr(perception, "lane", None)
-              or not perception.lane.valid):
-            mode, reason = "controlled_stop", "targets_or_lane_unavailable"
+        elif not getattr(perception, "lane", None) or not perception.lane.valid:
+            mode, reason = "controlled_stop", "lane_unavailable"
+        elif (requires_targets(getattr(perception, "scene_id", 0))
+              and (not getattr(perception, "targets_valid", False)
+                   or not isinstance(source_status.get("targets"), dict)
+                   or source_status["targets"].get("usable") is not True
+                   or not getattr(perception, "target_source", "").startswith("sensor:")
+                   or not self._target_records_valid(perception))):
+            mode, reason = "controlled_stop", "required_targets_unavailable"
         elif (current(decision, perception)
               and decision.mode == DecisionMode.EMERGENCY_BRAKE):
             mode, reason = "emergency_stop", "collision_or_emergency_request"

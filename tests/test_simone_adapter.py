@@ -69,6 +69,8 @@ class AdapterTests(unittest.TestCase):
         result = adapter.read_raw_snapshot()
         self.assertFalse(result["targets_valid"])
         self.assertEqual("none", result["target_source"])
+        self.assertEqual("cam1", result["source_status"]["targets"]["sensor_id"])
+        self.assertEqual("configured", result["source_status"]["targets"]["sensor_presence"])
         self.assertEqual([(20.0, 0.0)], result["route_points"])
         self.assertEqual([0.0, 0.0, 0.0, 1.0],
                          result["route_waypoints"][0]["heading_quaternion"])
@@ -87,6 +89,14 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(recovered["targets_valid"])
         self.assertEqual("ground_truth", recovered["target_source"])
         self.assertEqual(6, recovered["targets"][0]["type"])
+        sensor_config.sensorType = b"Radar"
+        adapter._reference_update = 0.0
+        calls = []
+        adapter.sensor_api.SoGetSensorDetections = lambda *args: calls.append(args) or False
+        absent = adapter.read_raw_snapshot()
+        self.assertEqual([], calls)
+        self.assertEqual("not_configured", absent["source_status"]["targets"]["sensor_presence"])
+        self.assertEqual("", absent["source_status"]["targets"]["sensor_id"])
 
     def test_traffic_uses_lane_stopline_and_caches_map_lookup(self):
         adapter = self._adapter()

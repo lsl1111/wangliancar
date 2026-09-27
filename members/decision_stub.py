@@ -1,6 +1,7 @@
 """Replace only decide() when the decision member delivers their module."""
 
 from core.interfaces import DecisionMode, DecisionTarget
+from core.scene_requirements import requires_targets
 from core.validation import current
 
 
@@ -16,7 +17,13 @@ def decide(perception):
     output.target_lane_id = perception.lane.lane_id
     output.reason = "integration baseline: hold current speed; no autonomous launch"
     output.valid = True
-    if not perception.targets_valid or not perception.lane.valid:
+    target_status = perception.source_status.get("targets", {})
+    targets_usable = (perception.targets_valid and
+                      perception.target_source.startswith("sensor:") and
+                      isinstance(target_status, dict) and
+                      target_status.get("usable") is True)
+    if not perception.lane.valid or (requires_targets(perception.scene_id)
+                                     and not targets_usable):
         output.mode, output.target_speed = DecisionMode.EMERGENCY_BRAKE, 0.0
         output.reason = "required perception source unavailable"
         return output
@@ -28,7 +35,7 @@ def decide(perception):
         output.mode, output.target_speed = DecisionMode.STOP, 0.0
         output.stop_distance = max(0.0, traffic.stop_line_distance - 3.0)
         output.reason = "stop before signal; 3m GPS-reference margin"
-    for target in perception.targets:
+    for target in perception.targets if targets_usable else []:
         # Unknown map membership is not evidence that an obstacle is off-lane.
         relevant = target.same_lane or (not target.same_lane_valid and target.lateral_band_match)
         if not target.valid or not relevant or target.longitudinal_distance <= 0:

@@ -98,6 +98,20 @@ class DataChainTests(unittest.TestCase):
         raw = self.raw()
         raw["targets_age_ms"] = 600
         self.assertFalse(self.builder.build_from_raw(raw).targets_valid)
+
+    def test_scene_six_decision_ignores_unavailable_targets(self):
+        raw = self.raw()
+        raw["targets_valid"] = False
+        raw["targets"] = [{"id": 7, "x": 1, "y": 0, "probability": 1.0}]
+        raw["source_status"] = {"targets": {"read_ok": False,
+                                                "sensor_presence": "not_configured"}}
+        value = self.builder.build_from_raw(raw)
+        self.assertEqual(6, value.scene_id)
+        self.assertNotIn("TARGETS_UNAVAILABLE", value.errors)
+        self.assertEqual("not_configured", value.source_status["targets"]["quality"])
+        self.assertEqual(DecisionMode.KEEP_LANE, decide(value).mode)
+        value.scene_id = 1
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decide(value).mode)
         raw = self.raw()
         raw["targets_frame"] = 5
         self.assertFalse(self.builder.build_from_raw(raw).targets_valid)
@@ -120,6 +134,7 @@ class DataChainTests(unittest.TestCase):
                         {"status": 1, "opendrive_id": 2, "stop_line_x": 40.1,
                          "stop_line_y": 0.0, "count_down": 10}]
         builder = PerceptionBuilder(MixedLights(), StraightLane())
+        builder.update_case_info()
         value = builder.build_from_raw(self.raw())
         self.assertTrue(value.traffic.observed)
         self.assertTrue(value.traffic.ambiguous)

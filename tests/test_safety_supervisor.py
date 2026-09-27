@@ -12,9 +12,11 @@ def chain(frame=1):
     p.valid, p.frame_id, p.timestamp = True, frame, frame * 1000
     p.valid_until = time.monotonic() + 20
     p.case_name, p.case_id = "06.车道居中控制", "case-06"
+    p.scene_id = 6
     p.ego.valid, p.ego.frame_id, p.ego.gear = True, frame, 1
     p.ego.age_ms = 0
     p.targets_valid, p.lane.valid = True, True
+    p.target_source = "sensor:perfectPerception1"
     p.source_status = {"gps": {"usable": True}, "targets": {"usable": True}}
     d = DecisionTarget().bind(p)
     d.valid = True
@@ -44,6 +46,7 @@ class SafetySupervisorTests(unittest.TestCase):
             self.safety.reset()
             p, d, t = chain()
             if field == "targets":
+                p.scene_id = 1
                 p.targets_valid = False
             else:
                 p.lane.valid = False
@@ -52,6 +55,22 @@ class SafetySupervisorTests(unittest.TestCase):
             self.assertTrue(result.control.valid)
             self.assertEqual(0.0, result.control.throttle)
             self.assertEqual(0.3, result.control.brake)
+
+    def test_unconfigured_target_sensor_does_not_stop_lane_scene(self):
+        p, d, t = chain()
+        p.targets_valid = False
+        p.source_status["targets"] = {"usable": False,
+                                       "sensor_presence": "not_configured"}
+        self.assertEqual("normal", self.safety.evaluate(p, d, t).mode)
+
+    def test_ground_truth_diagnostic_does_not_trigger_collision_override(self):
+        p, d, t = chain()
+        p.target_source = "ground_truth"
+        target = Target()
+        target.valid, target.lateral_band_match = True, True
+        target.longitudinal_distance, target.ttc = 4.0, 1.0
+        p.targets = [target]
+        self.assertEqual("normal", self.safety.evaluate(p, d, t).mode)
 
     def test_collision_request_uses_emergency_brake(self):
         p, d, t = chain()
@@ -73,6 +92,7 @@ class SafetySupervisorTests(unittest.TestCase):
 
     def test_malformed_target_does_not_crash_safety_gate(self):
         p, d, t = chain()
+        p.scene_id = 1
         p.targets = [SimpleNamespace(valid=True, lateral_band_match=True,
                                      longitudinal_distance=4.0, ttc=None)]
         self.assertEqual("controlled_stop", self.safety.evaluate(p, d, t).mode)

@@ -6,7 +6,7 @@
 
 ## 当前已经做到
 
-- 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS、传感器目标；传感器不可用时回退到 Ground Truth。
+- 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS，并按场景传感器配置读取目标；目标传感器不可用时 Ground Truth 仅作诊断回退。
 - 加载 HD Map，输出当前车道号、中心线、左右邻车道、车道宽度和车辆相对车道误差。
 - 自动从案例名称识别场景编号，例如 `06.车道居中控制-测试` 识别为场景 6。
 - 每一帧生成统一的 `Perception`，写入 `runtime_data/latest_perception.json`，方便全队直接查看。
@@ -15,7 +15,7 @@
 - 地图车道输出左右边界和标线；交通灯仅在当前车道关联到真实停止线时才输出有效灯色与沿车道的停车距离。
 - 已留下决策、规划、控制三个固定入口，并提供离线单元测试。
 - 默认 `send_control=false`，所以目前只观察、不抢车辆控制权。
-- 运行层另有刹车安全监护：目标/车道失效、紧急停车、轨迹/GPS 失效或 GPS 帧停滞时生成零油门刹车候选，并在 `latest_pipeline.json` 记录原因。只有 `send_control` 和 `safety_brake_enabled` 同时显式开启才会尝试发送；两项默认均为 `false`，候选刹车比例尚待场景标定。
+- 运行层另有刹车安全监护：当前场景必需的目标流或车道失效、紧急停车、轨迹/GPS 失效或 GPS 帧停滞时生成零油门刹车候选，并在 `latest_pipeline.json` 记录原因。06 等车道场景没有目标传感器时不因此停车；01 等目标场景仍要求有效的 Sensor API 目标源。只有 `send_control` 和 `safety_brake_enabled` 同时显式开启才会尝试发送；两项默认均为 `false`，候选刹车比例尚待场景标定。
 - 来源帧采用本机单调时钟判断停滞、回退和跨传感器帧差；超时及模块输出的来源帧、有效期在传输节点验证。传感器没有帧号时标记 `timing_unknown`，不伪称同步。
 
 ## 四个人怎样接入
@@ -64,6 +64,7 @@ E:\Sim-One\Tools\python36\python.exe main.py --once
 
 - `Perception.valid` 表示 GPS 自车基础状态可用；目标、车道、交通、路线及辅助传感器要分别查看各自的 `valid/status`。成功读取但没有目标与接口失败不同。
 - `source_status` 记录每个来源的 `read_ok`、帧号、本机重复帧持续时间、质量与 `usable`。`targets_valid=False` 表示目标读取失败、损坏、过期或不同步；空 `targets` 不能单独解释为“道路无车”。
+- `source_status.targets.sensor_presence` 区分 `configured`、`not_configured`、`unknown`；`sensor_read_ok` 记录目标 Sensor API 是否读取成功。`not_configured` 在不要求目标流的场景仅作状态记录，未知场景保守处理。
 - 本机 IMU 独立结构没有帧号；读数正常时 `imu_valid=True`，同时 `source_status["imu"].quality="timing_unknown"`、`usable=False`，需要同步状态的算法不能据此假定它与 GPS 同帧。
 - `Target.same_lane` 只在地图车道归属已核实时有效；`same_lane_valid=False` 时可参考 `lateral_band_match`，但它只是横向距离筛选。车道限速缺少可信来源时保持 `-1`，交通灯方向不明确时保留候选列表并标记 `ambiguous`。
 - `ego.acceleration` 是沿当前车头方向的有符号加速度（m/s²）；`ego.speed` 是水平速度大小（m/s），不表示倒车方向。`ego.age_ms` 和 `targets_age_ms` 是本进程从首次看到该帧起计算的时间，`-1` 表示未知。

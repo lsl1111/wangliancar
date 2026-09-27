@@ -15,7 +15,7 @@
 | 数据能力 / 典型场景 | 官方/本机 API | `Perception` 出口 | 当前状态与现场核对 |
 | --- | --- | --- | --- |
 | 自车后轴位置、姿态、速度、加速度；全部场景 | `SoGetGps` | `ego`、`source_status.gps` | 已接；查坐标、航向单位、连续帧、新鲜度，坡道 22 查 pitch |
-| 范围内目标及类型/运动/尺寸；01–03、11–18、21–40、41 | `SoGetSensorConfigurations` + `SoGetSensorDetections(vehicle_id, sensor_id)` | `sensor_configurations`、`targets`、`target_source`、`targets_valid`、`source_status.targets` | 已接单个配置的 `sensor_id`；现场核配置 ID、探测边界、遮挡/交叉事件、目标稳定 ID 和空帧有效性 |
+| 范围内目标及类型/运动/尺寸；01–03、11–18、21–28、30–41 | `SoGetSensorConfigurations` + `SoGetSensorDetections(vehicle_id, sensor_id)` | `sensor_configurations`、`targets`、`target_source`、`targets_valid`、`source_status.targets` | 优先使用配置 ID，缺失时选择配置中首个摄像头/激光雷达/融合/Perfect 目标源；无合适配置标记 `not_configured`，配置未知标记 `unknown`。现场核探测范围、遮挡、稳定 ID 和空帧有效性 |
 | 目标回退，仅诊断 | `SoGetGroundTruth` | `target_source=ground_truth` | 已接；它是全场景物体真值，不能以它证明限定范围的 Sensor API 正常。若现场出现，目标传感器项不通过；竞赛使用边界需按赛方规则确认 |
 | 车道中心、边界、宽度、邻道、连通、标线；04–06、16–20、26–32、41 | `loadHDMap`、`getNearMostLane`、`getLaneSample`、`getLaneWidth`、`getLaneLink`、`getRoadMark` | `lane`，目标 `lane_id/same_lane_valid` | 已接；现场核左右方向、地图与车身偏差、弯道/路口切换、实虚线及目标车道归属 |
 | 传感器车道观测；视觉关卡或地图互证 | `SoGetSensorLaneInfo` | `sensor_lane_observations/status` | 已按传感器类型接；不能与 HDMap 几何混作同一源，现场核传感器配置及坐标系 |
@@ -31,7 +31,7 @@
 
 ## 41 场景逐项数据验收矩阵
 
-公共条件 `B`：案例 ID/名称、GPS 连续帧及新鲜度、配置的 Sensor API 目标源、HDMap 车道；任何“目标为空”都须先确认 `targets_valid` 和来源。`T`：目标类型/相对位置/速度及进入退出事件。`L`：车道中心/边界/宽度/标线/连通。`I`：路口车道连通、冲突目标、独立停止线/人行横道（存在时）。`S`：信号灯与本车车道/方向、实际停止线。`P`：泊车位。`V`：限速标志的数值、单位和适用范围。`R`：任务路线。数据能力“缺口”不等于该题算法已经失败；它意味着现接口无法完整证明该题所需感知。
+公共条件 `B`：案例 ID/名称、GPS 连续帧及新鲜度、HDMap 车道。目标源只在标有 `T` 的场景中为硬条件；无目标传感器配置时，`targets_valid=False` 不阻断 06 等车道场景。目标场景中空列表仍须先确认 `targets_valid`、Sensor API 来源和配置。`T`：目标类型/相对位置/速度及进入退出事件。`L`：车道中心/边界/宽度/标线/连通。`I`：路口车道连通、冲突目标、独立停止线/人行横道（存在时）。`S`：信号灯与本车车道/方向、实际停止线。`P`：泊车位。`V`：限速标志的数值、单位和适用范围。`R`：任务路线。数据能力“缺口”不等于该题算法已经失败；它意味着现接口无法完整证明该题所需感知。
 
 | 编号 | 场景 | 必核数据 | 当前特别缺口/证据 |
 | --- | --- | --- | --- |

@@ -42,11 +42,24 @@ class SceneAcceptanceTests(unittest.TestCase):
     def test_ground_truth_is_not_sensor_acceptance(self):
         values = [frame(1), frame(2)]
         for value in values:
+            value["scene_id"] = 1
             value["target_source"] = "ground_truth"
-        report = analyze_frames(values, 6, 2)
+        report = analyze_frames(values, 1, 2)
         self.assertEqual("FAIL_OR_INCOMPLETE", report["status"])
         self.assertEqual(0, report["counts"]["targets_ok"])
         self.assertTrue(any("ground-truth" in warning for warning in report["warnings"]))
+
+    def test_scene_six_needs_no_target_sensor(self):
+        values = [frame(1), frame(2)]
+        for value in values:
+            value["targets_valid"] = False
+            value["source_status"]["targets"] = {"usable": False,
+                                                   "sensor_presence": "not_configured"}
+            value["target_source"] = "none"
+            value["sensor_configurations"] = []
+        report = analyze_frames(values, 6, 2)
+        self.assertEqual("STRUCTURAL_PASS", report["status"])
+        self.assertEqual(0, report["counts"]["targets_ok"])
 
     def test_wrong_scene_and_stalled_frame_fail(self):
         first = frame(1)

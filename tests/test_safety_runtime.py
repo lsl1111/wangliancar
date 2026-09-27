@@ -17,9 +17,11 @@ def perception(frame=10):
     p.valid, p.frame_id, p.timestamp = True, frame, frame * 1000
     p.valid_until = time.monotonic() + 10
     p.case_id, p.case_name = "case-06", "06.车道居中控制"
+    p.scene_id = 6
     p.ego.valid, p.ego.frame_id, p.ego.gear = True, frame, 1
     p.ego.age_ms = 0
     p.targets_valid, p.lane.valid = True, True
+    p.target_source = "sensor:perfectPerception1"
     p.source_status = {"gps": {"usable": True}, "targets": {"usable": True}}
     return p
 
@@ -85,6 +87,7 @@ class SafetyRuntimeTests(unittest.TestCase):
 
     def test_missing_target_suppresses_normal_throttle_when_unarmed(self):
         p = perception()
+        p.scene_id = 1
         p.targets_valid = False
         sent, pipeline = self.run_frames([p], armed=False)
         self.assertEqual([], sent)
@@ -98,6 +101,7 @@ class SafetyRuntimeTests(unittest.TestCase):
         self.assertFalse(config.send_control)
         self.assertFalse(config.safety_brake_enabled)
         p = perception()
+        p.scene_id = 1
         p.targets_valid = False
         sent, pipeline = self.run_frames([p], armed=True, send_control=False)
         self.assertEqual([], sent)
@@ -105,6 +109,7 @@ class SafetyRuntimeTests(unittest.TestCase):
 
     def test_armed_target_loss_sends_brake_instead_of_normal_throttle(self):
         p = perception()
+        p.scene_id = 1
         p.targets_valid = False
         sent, pipeline = self.run_frames([p], armed=True)
         self.assertEqual(1, len(sent))
@@ -113,6 +118,9 @@ class SafetyRuntimeTests(unittest.TestCase):
 
     def test_optional_sensor_error_does_not_override_normal_control(self):
         p = perception()
+        p.targets_valid = False
+        p.source_status["targets"] = {"usable": False,
+                                       "sensor_presence": "not_configured"}
         p.sensor_errors = ["imu:timing_unknown"]
         sent, pipeline = self.run_frames([p])
         self.assertEqual(0.2, sent[0][1])
