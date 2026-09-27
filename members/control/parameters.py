@@ -10,7 +10,7 @@ def _positive(name, value):
 
 
 class VehicleCalibration(object):
-    """All values must come from a vehicle-specific calibration run."""
+    """Vehicle geometry and trial command mapping; live response needs validation."""
 
     def __init__(self, wheelbase_m, front_steer_max_rad, steering_sign,
                  throttle_per_mps, brake_per_mps, hold_brake,

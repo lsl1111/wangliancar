@@ -142,16 +142,25 @@ class ControlTests(unittest.TestCase):
             VehicleCalibration.from_app_config(
                 SimpleNamespace(control_calibrated=True))
 
-    def test_fixed_entry_uses_safe_default_configuration(self):
+    def test_fixed_entry_uses_observe_only_trial_configuration(self):
         project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         config = load_config(project)
-        self.assertFalse(config.control_calibrated)
+        self.assertTrue(config.control_calibrated)
         self.assertFalse(config.send_control)
+        self.assertFalse(config.safety_brake_enabled)
+        self.assertAlmostEqual(2.9187, config.control_wheelbase_m)
+        self.assertEqual(-1, config.control_steering_sign)
         configure_control(config)
         p, t = inputs()
         result = compute_control(p, t)
-        self.assertFalse(result.valid)
+        self.assertTrue(result.valid, result.errors)
         self.assertIn("reference_speed_mps", result.diagnostics)
+        self.assertLessEqual(result.throttle, config.control_max_throttle)
+        left_path = [(float(i), 1.0, 2.0) for i in range(81)]
+        p, t = inputs(points=left_path)
+        left = ControlEngine(VehicleCalibration.from_app_config(config)).compute(p, t)
+        self.assertTrue(left.valid, left.errors)
+        self.assertLess(left.steering, 0.0)
 
     def test_calibrated_local_config_makes_candidate_valid_without_sending(self):
         project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

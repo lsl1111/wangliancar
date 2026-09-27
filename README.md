@@ -13,7 +13,7 @@
 - 同步写入 `runtime_data/latest_pipeline.json`，记录决策、轨迹、控制和平台发送回执；重复 GPS 帧仍更新快照与各传感器状态，但不会重复发送控制。
 - 额外读取任务路径点、传感器配置、环境，以及 SDK 可用时的 IMU、毫米波雷达、超声波与摄像头车道观测；这些数据在 `Perception` 中各自标明来源/有效性，不与目标真值混用。
 - 地图车道输出左右边界和标线；交通灯仅在当前车道关联到真实停止线时才输出有效灯色与沿车道的停车距离。
-- 决策、规划、控制保留固定入口；统一决策基线给出暂定 2 m/s 低速目标，静止时也可形成起步轨迹，场景必需数据失效、红灯和障碍停车条件仍优先。控制首版已接入前进挡 Pure Pursuit 横向跟踪、PI 速度控制与停车保持，尚待车型标定和现场闭环验收。
+- 决策、规划、控制保留固定入口；统一决策基线给出暂定 2 m/s 低速目标，静止时也可形成起步轨迹，场景必需数据失效、红灯和障碍停车条件仍优先。控制首版已接入前进挡 Pure Pursuit 横向跟踪、PI 速度控制与停车保持，默认用 SimOne-Car 的轴距和保守试运行系数计算候选指令，尚待现场闭环验收。
 - 默认 `send_control=false`，所以目前只观察、不抢车辆控制权。
 - 运行层另有刹车安全监护：当前场景必需的目标流或车道失效、紧急停车、轨迹/GPS 失效或 GPS 帧停滞时生成零油门刹车候选，并在 `latest_pipeline.json` 记录原因。06 等车道场景没有目标传感器时不因此停车；01 等目标场景仍要求有效的 Sensor API 目标源。只有 `send_control` 和 `safety_brake_enabled` 同时显式开启才会尝试发送；两项默认均为 `false`，候选刹车比例尚待场景标定。
 - 来源帧采用本机单调时钟判断停滞、回退和跨传感器帧差；超时及模块输出的来源帧、有效期在传输节点验证。传感器没有帧号时标记 `timing_unknown`，不伪称同步。
@@ -58,7 +58,7 @@ E:\Sim-One\Tools\python36\python.exe main.py --once
 
 ## 开启车辆控制前必须完成
 
-控制算法已实现离线首版，但缺少本车的轴距、最大前轮角、转向符号及踏板响应标定。默认 `control_calibrated=false`、`send_control=false`；此时 `compute_control()` 会发布诊断，但 `ControlOut.valid=False`，不会产生正常发送。标定参数及低速现场验收步骤见 [控制实现说明](members/control/IMPLEMENTATION.md)。全队确认后才由队长开启控制发送；正常发送也要求安全制动出口以 `safety_brake_enabled=true` 布防。
+控制算法已实现离线首版。默认 `control_calibrated=true` 表示已配置一套 **SimOne-Car 试运行参数**：轴距来自平台预设，其余转向和踏板比例是待验证的工程初值。有效感知与轨迹可产生 `ControlOut.valid=True` 的候选指令；这不等于整车响应已验收。默认 `send_control=false`、`safety_brake_enabled=false`，不会发送。参数含义和低速现场验收步骤见 [控制实现说明](members/control/IMPLEMENTATION.md)。全队确认后才由队长开启控制发送；正常发送也要求安全制动出口以 `safety_brake_enabled=true` 布防。
 
 ## 感知数据的含义
 
@@ -71,4 +71,4 @@ E:\Sim-One\Tools\python36\python.exe main.py --once
 - `route_points` 是二维案例任务路径提示，`route_waypoints` 另保留原始点序号和朝向四元数；两者都不是规划成员输出的 `Trajectory`。`traffic.stop_line_distance` 是沿当前车道中心线到真实停止线的距离，参考点为 GPS 位置；没有可靠停止线时交通字段保持无效。
 - 本机 Python 地图模块未提供可直接调用的车道限速接口，所以 `traffic.speed_limit=-1` 仍表示未知。图像、点云、V2X 原始流需要具体场景需求和独立处理链，不会自动进入当前结构化感知快照。
 - 41 场景的数据需求、必需 API 与现场验收步骤见 [场景数据验收清单](perception/SCENE_DATA_ACCEPTANCE.md)；只读采样命令为 `python scripts/accept_scene.py --scene 6 --frames 20 --timeout-sec 30`。报告的 `STRUCTURAL_PASS` 仅表示帧结构通过，事件仍需现场核对。
-- `DecisionTarget`、`Trajectory`、`ControlOut` 通过 `frame_id`、`timestamp`、`valid_until` 关联同一帧；`valid_until` 是本机单调时钟截止时间，不能跨进程持久化复用。当前规划只输出车道中心线前方的参考预览，控制算法离线通过测试但未完成车型标定与整车闭环验证。
+- `DecisionTarget`、`Trajectory`、`ControlOut` 通过 `frame_id`、`timestamp`、`valid_until` 关联同一帧；`valid_until` 是本机单调时钟截止时间，不能跨进程持久化复用。当前规划只输出车道中心线前方的参考预览，控制试运行映射已通过离线测试但未完成整车响应与闭环验证。

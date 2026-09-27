@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from core.config import load_config
 from core.interfaces import ControlOut, DecisionMode, DecisionTarget, LaneContext, Trajectory
 from core.serialization import perception_to_dict
 from members.decision_stub import decide
@@ -176,6 +177,13 @@ class DataChainTests(unittest.TestCase):
         self.assertFalse(control.valid)
         self.assertIn("reference_speed_mps", control.diagnostics)
         self.assertIn("vehicle calibration required", control.errors)
+        project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config = load_config(project)
+        self.assertFalse(config.send_control)
+        configure_control(config)
+        trial = compute_control(p, t)
+        self.assertTrue(trial.valid, trial.errors)
+        self.assertGreater(trial.throttle, 0.0)
 
     def test_shared_low_speed_target_requires_scene_inputs(self):
         raw = self.raw(x=50)
