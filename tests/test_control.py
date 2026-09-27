@@ -124,6 +124,81 @@ class ControlTests(unittest.TestCase):
         result = ControlEngine(calibration()).compute(p, t)
         self.assertLess(result.diagnostics["reference_speed_mps"], 5)
 
+    def test_curve_geometry_shortens_lookahead_and_limits_speed(self):
+        radius = 10.0
+        arc = [(radius * math.cos(i * 0.05),
+                radius * math.sin(i * 0.05), 8.0) for i in range(32)]
+        p, t = inputs(speed=6, x=radius, y=0, heading=math.pi / 2,
+                      points=arc)
+        t.target_speed = 8.0
+        curved = self.engine.compute(p, t)
+        self.assertTrue(curved.valid, curved.errors)
+        self.assertAlmostEqual(0.1, curved.diagnostics["path_curvature_m_inv"],
+                               delta=0.03)
+        self.assertLess(curved.diagnostics["lookahead_m"], 6.2)
+        self.assertLess(curved.diagnostics["curve_speed_limit_mps"], 4.2)
+        self.assertEqual(curved.diagnostics["curve_speed_limit_mps"],
+                         curved.diagnostics["reference_speed_mps"])
+        self.assertGreater(curved.brake, 0)
+        straight = [(float(i), 0.0, 8.0) for i in range(81)]
+        p, t = inputs(speed=6, points=straight)
+        t.target_speed = 8.0
+        direct = ControlEngine(calibration()).compute(p, t)
+        self.assertTrue(direct.valid, direct.errors)
+        self.assertAlmostEqual(6.2, direct.diagnostics["lookahead_m"])
+        self.assertEqual(8.0, direct.diagnostics["reference_speed_mps"])
+        self.assertGreater(direct.throttle, 0)
+
+    def test_upcoming_corner_limits_speed_before_turn(self):
+        points = ([(float(i), 0.0, 8.0) for i in range(11)] +
+                  [(10.0, float(i), 8.0) for i in range(1, 21)])
+        p, t = inputs(speed=7, x=0, points=points)
+        t.target_speed = 8.0
+        result = self.engine.compute(p, t)
+        self.assertTrue(result.valid, result.errors)
+        self.assertLess(result.diagnostics["curve_speed_limit_mps"], 7.0)
+        self.assertGreater(result.brake, 0)
+        self.assertEqual(0, result.throttle)
+
+    def test_curve_window_ignores_small_centerline_wobble(self):
+        points = [(float(i), 0.02 * math.sin(2.0 * i), 8.0)
+                  for i in range(81)]
+        p, t = inputs(speed=6, x=0, points=points)
+        t.target_speed = 8.0
+        result = self.engine.compute(p, t)
+        self.assertTrue(result.valid, result.errors)
+        self.assertEqual(8.0, result.diagnostics["curve_speed_limit_mps"])
+
+    def test_adaptive_lookahead_reduces_circle_tracking_error_in_bicycle_model(self):
+        radius = 10.0
+        arc = [(radius * math.cos(i * 0.05),
+                radius * math.sin(i * 0.05), 8.0) for i in range(32)]
+        vehicle = calibration()
+
+        def tracking_error(gain):
+            settings = ControllerSettings()
+            settings.curve_lookahead_gain_m = gain
+            now = [0.0]
+            engine = ControlEngine(vehicle, settings, clock=lambda: now[0])
+            x, y, heading = radius, 0.0, math.pi / 2.0
+            for frame in range(1, 61):
+                p, t = inputs(frame=frame, speed=3.5, x=x, y=y,
+                              heading=heading, points=arc)
+                t.target_speed = 8.0
+                result = engine.compute(p, t)
+                self.assertTrue(result.valid, result.errors)
+                front_angle = result.steering * vehicle.front_steer_max_rad
+                heading += (3.5 / vehicle.wheelbase_m *
+                            math.tan(front_angle) * 0.05)
+                x += 3.5 * math.cos(heading) * 0.05
+                y += 3.5 * math.sin(heading) * 0.05
+                now[0] += 0.05
+            return abs(math.hypot(x, y) - radius)
+
+        fixed_error = tracking_error(0.0)
+        adaptive_error = tracking_error(4.0)
+        self.assertLess(adaptive_error, fixed_error - 0.005)
+
     def test_emergency_bypasses_degenerate_path_and_cuts_throttle(self):
         p, t = inputs(speed=4, points=[(5.0, 0.0, 0.0),
                                        (5.0, 0.0, 0.0)])

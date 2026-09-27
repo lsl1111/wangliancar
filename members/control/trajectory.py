@@ -1,6 +1,7 @@
 """Spatial path sampling for the forward-only controller (metres, m/s)."""
 
 import math
+from bisect import bisect_left
 
 from core.geometry import normalize_angle
 
@@ -10,7 +11,7 @@ def _finite(value):
 
 
 class PreparedPath(object):
-    def __init__(self, points, max_segment_m):
+    def __init__(self, points, max_segment_m, curve_window_m=3.0):
         self.points = []
         self.arc = []
         for point in points:
@@ -33,6 +34,8 @@ class PreparedPath(object):
             self.points.append((float(x), float(y), float(speed)))
         if len(self.points) < 2 or self.arc[-1] <= 1e-6:
             raise ValueError("path has no forward geometry")
+        self.curvatures = [self.curvature_at(s, curve_window_m)
+                           for s in self.arc]
 
     @property
     def length(self):
@@ -67,14 +70,46 @@ class PreparedPath(object):
 
     def sample(self, s):
         s = max(0.0, min(self.length, s))
-        for index in range(len(self.arc) - 1):
-            if s <= self.arc[index + 1] or index == len(self.arc) - 2:
-                segment = self.arc[index + 1] - self.arc[index]
-                ratio = (s - self.arc[index]) / segment
-                first, second = self.points[index], self.points[index + 1]
-                return tuple(first[k] + ratio * (second[k] - first[k])
-                             for k in range(3))
-        return self.points[-1]
+        index = max(0, min(len(self.arc) - 2, bisect_left(self.arc, s) - 1))
+        segment = self.arc[index + 1] - self.arc[index]
+        ratio = (s - self.arc[index]) / segment
+        first, second = self.points[index], self.points[index + 1]
+        return tuple(first[k] + ratio * (second[k] - first[k])
+                     for k in range(3))
+
+    def curvature_at(self, s, window_m=3.0):
+        """Signed path curvature from three equally spaced arc samples."""
+        left_s = max(0.0, s - window_m)
+        right_s = min(self.length, s + window_m)
+        if right_s - left_s <= 1e-6:
+            return 0.0
+        middle_s = s
+        if middle_s - left_s <= 1e-6 or right_s - middle_s <= 1e-6:
+            middle_s = (left_s + right_s) / 2.0
+        ax, ay = self.sample(left_s)[:2]
+        bx, by = self.sample(middle_s)[:2]
+        cx, cy = self.sample(right_s)[:2]
+        ab = math.hypot(bx - ax, by - ay)
+        bc = math.hypot(cx - bx, cy - by)
+        ac = math.hypot(cx - ax, cy - ay)
+        if min(ab, bc, ac) <= 1e-6:
+            return 0.0
+        cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        return 2.0 * cross / (ab * bc * ac)
+
+    def curve_speed_limit(self, s, settings):
+        """Slow before geometric turns using the same braking envelope as points."""
+        limit = settings.max_track_speed_mps
+        for turn_s, curvature in zip(self.arc, self.curvatures):
+            if turn_s < s - settings.turn_exit_margin_m or abs(curvature) <= 1e-6:
+                continue
+            turn_speed = max(settings.min_curve_speed_mps,
+                             math.sqrt(settings.max_lateral_accel_mps2 /
+                                       abs(curvature)))
+            distance = max(0.0, turn_s - s)
+            limit = min(limit, math.sqrt(turn_speed * turn_speed +
+                                         2.0 * settings.preview_decel_mps2 * distance))
+        return limit
 
     def speed_reference(self, s, trajectory, settings):
         """Point speed with future slowdowns and known path end as upper bounds."""

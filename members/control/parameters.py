@@ -53,7 +53,13 @@ class ControllerSettings(object):
     def __init__(self):
         self.lookahead_base_m = 2.0
         self.lookahead_time_s = 0.7
+        self.lookahead_min_m = 1.5
         self.lookahead_max_m = 10.0
+        self.curve_lookahead_gain_m = 4.0
+        self.curve_window_m = 3.0
+        self.max_lateral_accel_mps2 = 1.5
+        self.min_curve_speed_mps = 0.8
+        self.turn_exit_margin_m = 1.0
         self.max_segment_m = 12.0
         self.max_projection_error_m = 2.0
         self.max_heading_error_rad = math.pi / 2

@@ -131,16 +131,20 @@ class ControlEngine(object):
                 self.last_output = output
                 return output
 
-            path = PreparedPath(trajectory.points, self.settings.max_segment_m)
+            path = PreparedPath(trajectory.points, self.settings.max_segment_m,
+                                self.settings.curve_window_m)
             progress, cross_track, heading_error = path.project(
                 ego.x, ego.y, ego.heading, self.settings)
             reference, remaining = path.speed_reference(progress, trajectory,
                                                         self.settings)
+            curve_limit = path.curve_speed_limit(progress, self.settings)
+            reference = min(reference, curve_limit)
             if trajectory.stop_required and trajectory.target_speed == 0:
                 reference = min(reference, ego.speed)
             output.diagnostics.update({
                 "path_progress_m": progress, "path_remaining_m": remaining,
                 "cross_track_abs_m": cross_track, "heading_error_rad": heading_error,
+                "curve_speed_limit_mps": curve_limit,
                 "reference_speed_mps": reference,
                 "speed_error_mps": reference - ego.speed})
             hold_request = (reference <= self.settings.hold_speed_mps and

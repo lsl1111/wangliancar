@@ -6,8 +6,12 @@ from core.geometry import world_to_ego
 
 
 def geometry_request(path, progress, ego, settings):
-    distance = min(settings.lookahead_max_m,
-                   settings.lookahead_base_m + settings.lookahead_time_s * ego.speed)
+    path_curvature = path.curvature_at(progress, settings.curve_window_m)
+    base_distance = min(settings.lookahead_max_m,
+                        settings.lookahead_base_m + settings.lookahead_time_s * ego.speed)
+    distance = max(settings.lookahead_min_m,
+                   base_distance / (1.0 + settings.curve_lookahead_gain_m *
+                                    abs(path_curvature)))
     lookahead_s = min(path.length, progress + distance)
     target_x, target_y, unused_speed = path.sample(lookahead_s)
     forward, left = world_to_ego(ego.x, ego.y, ego.heading, target_x, target_y)
@@ -20,6 +24,7 @@ def geometry_request(path, progress, ego, settings):
     return curvature, {
         "lookahead_x": target_x, "lookahead_y": target_y,
         "lookahead_s": lookahead_s, "lookahead_m": distance,
+        "path_curvature_m_inv": path_curvature,
         "curvature_m_inv": curvature,
         "lookahead_forward_m": forward, "lookahead_left_m": left}
 
