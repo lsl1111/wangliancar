@@ -159,18 +159,40 @@ class DataChainTests(unittest.TestCase):
 
     def test_scene_six_reaches_control_diagnostics_without_target_sensor(self):
         raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
         raw["targets_valid"] = False
         raw["source_status"] = {"targets": {"read_ok": False,
                                                 "sensor_presence": "not_configured"}}
         p = self.builder.build_from_raw(raw)
         d = decide(p)
+        self.assertEqual(DecisionMode.KEEP_LANE, d.mode)
+        self.assertEqual(2.0, d.target_speed)
         t = plan(p, d)
         self.assertTrue(t.valid, t.errors)
+        self.assertEqual(2.0, t.target_speed)
+        self.assertGreater(t.points[0].speed, 0.0)
         configure_control(SimpleNamespace(control_calibrated=False))
         control = compute_control(p, t)
         self.assertFalse(control.valid)
         self.assertIn("reference_speed_mps", control.diagnostics)
         self.assertIn("vehicle calibration required", control.errors)
+
+    def test_scene_six_launch_yields_to_required_stop(self):
+        raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
+        p = self.builder.build_from_raw(raw)
+        p.traffic.observed = True
+        p.traffic.signal_state = "RED"
+        p.traffic.stop_line_distance = 20.0
+        decision = decide(p)
+        self.assertEqual(DecisionMode.STOP, decision.mode)
+        self.assertEqual(0.0, decision.target_speed)
+        self.assertEqual(17.0, decision.stop_distance)
+        p.traffic.observed = False
+        p.lane.valid = False
+        decision = decide(p)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decision.mode)
+        self.assertEqual(0.0, decision.target_speed)
 
     def test_curved_lane_uses_local_direction_and_reverses_boundaries(self):
         points = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (-10, 10, 0)]
