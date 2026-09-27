@@ -8,6 +8,7 @@ import time
 from core.serialization import perception_to_dict, to_dict
 from core.validation import validate_output
 from core.interfaces import DecisionTarget, Trajectory, ControlOut
+from core.safety_supervisor import SafetySupervisor
 from members.control_stub import compute_control
 from members.decision_stub import decide
 from members.planning_stub import plan
@@ -26,6 +27,7 @@ class CaptainRuntime(object):
         self.snapshot_path = os.path.join(config.runtime_dir, "latest_perception.json")
         self.pipeline_path = os.path.join(config.runtime_dir, "latest_pipeline.json")
         self._warned_no_control = False
+        self.safety = SafetySupervisor(config)
 
     def request_stop(self, unused_signal=None, unused_frame=None):
         self.stop_requested = True
@@ -84,8 +86,24 @@ class CaptainRuntime(object):
             except Exception as exc:
                 control = ControlOut().bind(trajectory)
                 control.errors.append("CONTROL_INVALID:" + type(exc).__name__ + ":" + str(exc))
-            receipt = {"attempted": False, "ok": False, "reason": "observe_mode"}
-            if self.config.send_control:
+            safety = self.safety.evaluate(perception, decision, trajectory)
+            receipt = {"attempted": False, "ok": False, "reason": "observe_mode",
+                       "safety_mode": safety.mode, "safety_reason": safety.reason,
+                       "safety_candidate": safety.control is not None}
+            if safety.active:
+                if (self.config.send_control and
+                        getattr(self.config, "safety_brake_enabled", False) and
+                        safety.control is not None):
+                    receipt["attempted"] = True
+                    receipt["ok"] = bool(self.adapter.send_control(safety.control))
+                    receipt["reason"] = ("safety_sent" if receipt["ok"]
+                                         else "safety_send_failed")
+                    receipt["adapter"] = to_dict(getattr(self.adapter, "last_send_result", {}))
+                elif safety.control is None:
+                    receipt["reason"] = "safety_command_unavailable"
+                else:
+                    receipt["reason"] = "safety_observe_only"
+            elif self.config.send_control:
                 if repeated:
                     receipt["reason"] = "gps_frame_repeated"
                 elif decision.valid and trajectory.valid and control.valid:
@@ -104,7 +122,8 @@ class CaptainRuntime(object):
                     receipt["reason"] = "pipeline_invalid"
             if self.config.publish_json:
                 self._publish(perception)
-                self._publish_pipeline(perception, decision, trajectory, control, receipt)
+                self._publish_pipeline(perception, decision, trajectory, control, receipt,
+                                       safety)
             processed += 1
             if processed == 1 or processed % 100 == 0:
                 self.logger.info(
@@ -143,12 +162,14 @@ class CaptainRuntime(object):
             )
         os.replace(temporary, self.snapshot_path)
 
-    def _publish_pipeline(self, perception, decision, trajectory, control, receipt):
+    def _publish_pipeline(self, perception, decision, trajectory, control, receipt, safety):
         temporary = self.pipeline_path + ".tmp"
         with open(temporary, "w", encoding="utf-8") as stream:
             json.dump({"perception_frame_id": perception.frame_id,
                        "decision": to_dict(decision), "trajectory": to_dict(trajectory),
-                       "control": to_dict(control), "send": receipt},
+                       "control": to_dict(control), "safety": {
+                           "mode": safety.mode, "reason": safety.reason,
+                           "candidate": to_dict(safety.control)}, "send": receipt},
                       stream, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
         os.replace(temporary, self.pipeline_path)
 
