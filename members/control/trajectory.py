@@ -114,6 +114,15 @@ class PreparedPath(object):
     def speed_reference(self, s, trajectory, settings):
         """Point speed with future slowdowns and known path end as upper bounds."""
         local = self.sample(s)[2]
+        # A moving profile may start at the measured speed of zero. Look just
+        # ahead for its first positive speed so the controller can leave HOLD.
+        if local <= settings.hold_speed_mps and trajectory.target_speed > 0:
+            preview_s = min(self.length, s + settings.launch_preview_m)
+            preview_speed = self.sample(preview_s)[2]
+            launch_limit = math.sqrt(local * local +
+                                     2.0 * settings.launch_accel_mps2 *
+                                     max(0.0, preview_s - s))
+            local = max(local, min(preview_speed, launch_limit))
         remaining = max(0.0, self.length - s - settings.path_end_margin_m)
         limit = min(local, settings.max_track_speed_mps,
                     math.sqrt(2.0 * settings.preview_decel_mps2 * remaining))
@@ -122,7 +131,7 @@ class PreparedPath(object):
                 raise ValueError("stop distance missing")
             stop_remaining = max(0.0, trajectory.stop_distance - settings.path_end_margin_m)
             limit = min(limit, math.sqrt(2.0 * settings.preview_decel_mps2 * stop_remaining))
-        else:
+        if not trajectory.stop_required or trajectory.target_speed > 0:
             limit = min(limit, trajectory.target_speed)
         for index, future_s in enumerate(self.arc):
             if future_s <= s:

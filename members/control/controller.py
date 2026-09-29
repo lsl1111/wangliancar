@@ -90,10 +90,10 @@ class ControlEngine(object):
                     not all(_finite(getattr(ego, name)) for name in
                             ("x", "y", "heading", "speed")) or ego.speed < 0):
                 raise ValueError("ego pose or speed invalid")
-            if type(ego.gear) is not int or ego.gear != 1:
-                raise ValueError("only forward Drive gear is supported")
+            if type(ego.gear) is not int or ego.gear not in (0, 1, 2, 3):
+                raise ValueError("invalid automatic gear")
             validate_output(trajectory, Trajectory, perception)
-            output.gear = 1
+            output.gear = ego.gear
             output.diagnostics["dt_s"] = dt
             if trajectory.emergency_stop:
                 self.integral = 0.0
@@ -109,6 +109,8 @@ class ControlEngine(object):
                 self.last_output = output
                 return output
 
+            if ego.gear != 1:
+                raise ValueError("only forward Drive gear is supported for tracking")
             if _stationary_stop(trajectory):
                 origin = trajectory.points[0]
                 if math.hypot(ego.x - origin.x, ego.y - origin.y) > self.settings.max_projection_error_m:

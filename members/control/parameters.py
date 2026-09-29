@@ -65,6 +65,8 @@ class ControllerSettings(object):
         self.max_heading_error_rad = math.pi / 2
         self.path_end_margin_m = 0.5
         self.preview_decel_mps2 = 2.0
+        self.launch_preview_m = 1.0
+        self.launch_accel_mps2 = 1.0
         self.max_track_speed_mps = 8.0
         self.pi_kp = 1.0
         self.pi_ki = 0.25

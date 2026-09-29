@@ -27,7 +27,7 @@ def inputs(frame=1, speed=2.0, heading=0.0, x=5.0, y=0.0,
     p = Perception()
     p.valid, p.frame_id, p.timestamp = True, frame, frame * 1000
     p.valid_until = time.monotonic() + 20
-    p.case_id, p.case_name, p.scene_id = "case-06", "06.车道居中控制", 6
+    p.case_id, p.case_name, p.scene_id = "unit-control", "synthetic path", 0
     p.ego.valid, p.ego.frame_id, p.ego.age_ms = True, frame, 0
     p.ego.gear = 1
     p.ego.x, p.ego.y, p.ego.heading, p.ego.speed = x, y, heading, speed
@@ -50,6 +50,18 @@ class ControlTests(unittest.TestCase):
 
     def advance(self):
         self.now += 0.05
+
+    def test_same_trajectory_control_does_not_depend_on_scene_number(self):
+        p, t = inputs()
+        p.scene_id = 4
+        first = ControlEngine(calibration(), clock=lambda: self.now).compute(p, t)
+        p, t = inputs()
+        p.scene_id = 41
+        second = ControlEngine(calibration(), clock=lambda: self.now).compute(p, t)
+        self.assertTrue(first.valid, first.errors)
+        self.assertTrue(second.valid, second.errors)
+        self.assertEqual((first.throttle, first.brake, first.steering),
+                         (second.throttle, second.brake, second.steering))
 
     def test_left_right_and_rotated_path_steering_sign(self):
         left = [(float(i), 1.0, 5.0) for i in range(81)]
@@ -123,6 +135,57 @@ class ControlTests(unittest.TestCase):
         p, t = inputs(points=points, speed=5)
         result = ControlEngine(calibration()).compute(p, t)
         self.assertLess(result.diagnostics["reference_speed_mps"], 5)
+
+    def test_zero_speed_first_point_can_launch_from_moving_profile(self):
+        points = [(0.0, 0.0, 0.0), (1.0, 0.0, 1.0)] + [
+            (float(i), 0.0, 2.0) for i in range(2, 81)]
+        p, t = inputs(speed=0, x=0, points=points)
+        t.target_speed = 2.0
+        result = self.engine.compute(p, t)
+        self.assertTrue(result.valid, result.errors)
+        self.assertEqual("TRACK", result.diagnostics["state"])
+        self.assertGreater(result.diagnostics["reference_speed_mps"], 0.5)
+        self.assertGreater(result.throttle, 0)
+        self.assertEqual(0, result.brake)
+
+    def test_positive_global_target_caps_stopping_profile(self):
+        points = [(float(i), 0.0, 8.0) for i in range(81)]
+        p, t = inputs(speed=0, points=points)
+        t.stop_required, t.stop_distance, t.target_speed = True, 50.0, 2.0
+        result = self.engine.compute(p, t)
+        self.assertTrue(result.valid, result.errors)
+        self.assertLessEqual(result.diagnostics["reference_speed_mps"], 2.0)
+
+    def test_general_forward_lateral_shift_is_tracked(self):
+        # The controller follows the supplied path without selecting a lane.
+        points = []
+        for i in range(61):
+            u = min(1.0, i / 30.0)
+            y = 3.5 * (6.0 * u ** 5 - 15.0 * u ** 4 + 10.0 * u ** 3)
+            points.append((float(i), y, 4.0))
+        x = y = heading = 0.0
+        steering = []
+        errors = []
+        vehicle = calibration()
+        for frame in range(1, 201):
+            p, t = inputs(frame=frame, speed=4.0, x=x, y=y,
+                          heading=heading, points=points)
+            t.target_speed = 4.0
+            t.target_lane_id = "other-lane"
+            result = self.engine.compute(p, t)
+            self.assertTrue(result.valid, result.errors)
+            steering.append(result.steering)
+            errors.append(result.diagnostics["cross_track_abs_m"])
+            front_angle = result.steering * vehicle.front_steer_max_rad
+            heading += (4.0 / vehicle.wheelbase_m *
+                        math.tan(front_angle) * 0.05)
+            x += 4.0 * math.cos(heading) * 0.05
+            y += 4.0 * math.sin(heading) * 0.05
+            self.advance()
+        self.assertGreater(max(steering), 0.0)
+        self.assertLess(min(steering), 0.0)
+        self.assertLess(max(errors), 0.15)
+        self.assertAlmostEqual(3.5, y, delta=0.15)
 
     def test_curve_geometry_shortens_lookahead_and_limits_speed(self):
         radius = 10.0
@@ -208,6 +271,23 @@ class ControlTests(unittest.TestCase):
         self.assertEqual("EMERGENCY", result.diagnostics["state"])
         self.assertEqual((0.0, 0.9, 0.0),
                          (result.throttle, result.brake, result.steering))
+
+    def test_emergency_brakes_in_reverse_without_enabling_reverse_tracking(self):
+        p, t = inputs(speed=1.0, points=[(5.0, 0.0, 0.0),
+                                         (5.0, 0.0, 0.0)])
+        p.ego.gear = 2
+        t.emergency_stop, t.stop_required, t.target_speed = True, True, 0.0
+        emergency = self.engine.compute(p, t)
+        self.assertTrue(emergency.valid, emergency.errors)
+        self.assertEqual(2, emergency.gear)
+        self.assertEqual((0.0, 0.9, 0.0),
+                         (emergency.throttle, emergency.brake, emergency.steering))
+        self.advance()
+        p, t = inputs(frame=2)
+        p.ego.gear = 2
+        ordinary = self.engine.compute(p, t)
+        self.assertFalse(ordinary.valid)
+        self.assertIn("only forward Drive gear", ordinary.errors[0])
 
     def test_stationary_stop_brakes_then_holds_without_forward_geometry(self):
         stationary_points = [(5.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
