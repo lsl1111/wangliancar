@@ -5,13 +5,16 @@ import math
 from core.geometry import world_to_ego
 
 
-def geometry_request(path, progress, ego, settings):
+def geometry_request(path, progress, ego, settings, direction=1, precision=False):
     path_curvature = path.curvature_at(progress, settings.curve_window_m)
     base_distance = min(settings.lookahead_max_m,
                         settings.lookahead_base_m + settings.lookahead_time_s * ego.speed)
     distance = max(settings.lookahead_min_m,
                    base_distance / (1.0 + settings.curve_lookahead_gain_m *
                                     abs(path_curvature)))
+    if direction == -1:
+        distance = max(settings.reverse_lookahead_min_m,
+                       min(settings.reverse_lookahead_max_m, distance))
     lookahead_s = min(path.length, progress + distance)
     target_x, target_y, unused_speed = path.sample(lookahead_s)
     # Predict rear-axle motion during a bounded actuator preview. This uses
@@ -25,17 +28,21 @@ def geometry_request(path, progress, ego, settings):
                            0.35 * (lookahead_s - progress) / ego.speed)
         angle = yaw_rate * preview_time
         if abs(angle) < 1e-6:
-            dx, dy = ego.speed * preview_time, 0.0
+            dx, dy = direction * ego.speed * preview_time, 0.0
         else:
-            radius = ego.speed / yaw_rate
+            radius = direction * ego.speed / yaw_rate
             dx, dy = radius * math.sin(angle), radius * (1.0 - math.cos(angle))
         preview_x += dx * math.cos(ego.heading) - dy * math.sin(ego.heading)
         preview_y += dx * math.sin(ego.heading) + dy * math.cos(ego.heading)
         preview_heading += angle
     forward, left = world_to_ego(preview_x, preview_y, preview_heading, target_x, target_y)
     chord2 = forward * forward + left * left
-    if forward <= 0.1 or chord2 <= 0.04:
+    minimum_x, minimum_chord2 = (0.005, 0.0001) if precision else (0.1, 0.04)
+    if direction * forward <= minimum_x or chord2 <= minimum_chord2:
         raise ValueError("no forward lookahead point")
+    # Body coordinates remain x-forward/y-left in reverse. The lookahead is
+    # behind the axle; 2*y/chord^2 already gives the physical front-wheel
+    # curvature. An extra sign flip would steer away from the reverse path.
     curvature = 2.0 * left / chord2
     if not math.isfinite(curvature):
         raise ValueError("nonfinite curvature")

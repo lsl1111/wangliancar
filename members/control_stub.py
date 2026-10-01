@@ -1,4 +1,4 @@
-"""Fixed team entry for the forward-only controller."""
+"""Fixed team entry for forward/reverse trajectory execution."""
 
 from members.control.controller import ControlEngine
 from members.control.parameters import VehicleCalibration

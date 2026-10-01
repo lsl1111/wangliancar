@@ -1,4 +1,4 @@
-"""Forward Pure Pursuit + PI/profile-feedforward control with explicit arming.
+"""Bidirectional Pure Pursuit + PI/profile-feedforward trajectory execution.
 
 The engine computes spatial diagnostics before calibration, but never marks a
 pedal/steering command valid until vehicle-specific mapping is supplied.
@@ -8,11 +8,13 @@ import math
 import time
 
 from core.interfaces import ControlOut, Trajectory
+from core.geometry import normalize_angle
 from core.validation import current, validate_output
 from members.control.lateral import geometry_request, steering_request
 from members.control.longitudinal import pedal_request, applied_integral
 from members.control.parameters import ControllerSettings
 from members.control.trajectory import PreparedPath
+from members.control.maneuvers import DirectionInterlock, StandstillGuard
 
 
 def _finite(value):
@@ -47,17 +49,56 @@ class ControlEngine(object):
         self.integral = 0.0
         self.state = "INIT"
         self.release_frames = 0
+        self.direction = DirectionInterlock()
+        self.standstill = StandstillGuard()
 
     def _invalid(self, output, reason):
         self.integral = 0.0
         self.release_frames = 0
         self.last_output = None
         self.state = "FAULT_STOP"
+        self.direction.disarm()
+        self.standstill.interrupt()
         output.throttle = output.brake = output.steering = 0.0
         output.source = "control:FAULT_STOP"
         output.errors.append(reason)
         output.diagnostics["state"] = self.state
         return output
+
+    def _braking_output(self, output, ego, state, gear=0, handbrake=False):
+        if self.calibration is None:
+            return self._invalid(output, "vehicle calibration required")
+        self.integral = 0.0
+        if state != "HOLD":
+            self.release_frames = 0
+        self.state = state
+        output.gear = gear
+        output.throttle = output.steering = 0.0
+        output.brake = (self.calibration.hold_brake
+                        if ego.speed <= self.settings.gear_standstill_speed_mps
+                        else self.calibration.max_brake)
+        output.handbrake = handbrake and ego.speed <= self.settings.gear_standstill_speed_mps
+        output.diagnostics.update({"state": state, "reference_speed_mps": 0.0,
+                                   "speed_error_mps": -ego.speed,
+                                   "hold_remaining_s": max(0.0, self.standstill.duration -
+                                                            self.standstill.elapsed)})
+        output.source, output.valid = "control:" + state, True
+        output.clamp()
+        self.last_output = output
+        return output
+
+    def _hold_output(self, output, ego, trajectory, arrived):
+        output.diagnostics["stop_pose_arrived"] = arrived
+        if arrived and ego.speed <= self.settings.gear_standstill_speed_mps:
+            self.standstill.begin(trajectory, ego)
+        if self.standstill.active:
+            self.direction.disarm()
+            return self._braking_output(output, ego, "DWELL", 0,
+                                        self.standstill.parking_brake)
+        gear = (1 if self.direction.active_direction == 1 else
+                2 if self.direction.active_direction == -1 else 0)
+        return self._braking_output(output, ego, "HOLD", gear,
+                                    getattr(trajectory, "parking_brake_at_stop", False))
 
     def compute(self, perception, trajectory):
         output = ControlOut()
@@ -66,7 +107,8 @@ class ControlEngine(object):
         now = self.clock()
         try:
             output.bind(trajectory)
-            case = (perception.case_id, perception.case_name)
+            case = (perception.case_id, perception.case_name,
+                    getattr(perception, "task_id", ""), perception.scene_id)
             if self.case != case:
                 self.reset()
                 self.case = case
@@ -106,10 +148,17 @@ class ControlEngine(object):
             # Brake-only output uses Neutral; forward tracking requests Drive.
             output.gear = 0
             output.diagnostics["dt_s"] = dt
+            direction = getattr(trajectory, "motion_direction", 1)
+            precision = getattr(trajectory, "precision_stop", False)
+            for name in ("left_signal", "right_signal", "hazard_signal"):
+                setattr(output, name, getattr(trajectory, name, False))
+            output.diagnostics["motion_direction"] = direction
             if trajectory.emergency_stop:
                 self.integral = 0.0
                 self.release_frames = 0
                 self.state = "EMERGENCY"
+                self.direction.disarm()
+                self.standstill.interrupt()
                 output.diagnostics["state"] = self.state
                 if self.calibration is None:
                     return self._invalid(output, "vehicle calibration required")
@@ -120,40 +169,53 @@ class ControlEngine(object):
                 self.last_output = output
                 return output
 
-            if (not all(_finite(getattr(ego, name)) for name in ("vx", "vy"))
-                    or ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -1e-6):
-                raise ValueError("reverse or invalid velocity is unsupported for forward tracking")
-            # Keep observed gearbox positions intact; the forward trajectory
-            # supplies the intent, and signed velocity rejects reverse motion.
-            output.gear = 1
+            if not all(_finite(getattr(ego, name)) for name in ("vx", "vy")):
+                raise ValueError("reverse or invalid velocity")
+            signed_speed = ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading)
+            vector_speed = math.hypot(ego.vx, ego.vy)
+            if (vector_speed > ego.speed + self.settings.gear_standstill_speed_mps or
+                    ((direction == -1 or self.direction.pending_direction is not None) and
+                     abs(vector_speed - ego.speed) > self.settings.gear_standstill_speed_mps)):
+                raise ValueError("reverse or invalid velocity magnitude disagrees with ego speed")
+            if self.standstill.update(ego, dt, self.settings):
+                return self._braking_output(output, ego, "DWELL", 0,
+                                            self.standstill.parking_brake)
+            if (direction == self.direction.last_direction and
+                    self.direction.pending_direction is None and
+                    direction * signed_speed < -1e-6):
+                raise ValueError("reverse or invalid velocity opposes requested motion")
+            output.gear = 1 if direction == 1 else 2
             output.diagnostics["observed_gear"] = ego.gear
             output.diagnostics["requested_gear"] = output.gear
+            output.diagnostics["signed_body_speed_mps"] = signed_speed
             if _stationary_stop(trajectory):
                 origin = trajectory.points[0]
                 if math.hypot(ego.x - origin.x, ego.y - origin.y) > self.settings.max_projection_error_m:
                     raise ValueError("stationary stop is too far from vehicle")
                 if self.calibration is None:
                     return self._invalid(output, "vehicle calibration required")
-                self.integral = 0.0
                 self.release_frames = 0
-                self.state = ("HOLD" if ego.speed <= self.settings.hold_speed_mps
-                              else "STOPPING")
-                output.brake = (self.calibration.hold_brake if self.state == "HOLD"
-                                else self.calibration.max_brake)
-                output.diagnostics.update({
-                    "reference_speed_mps": 0.0,
-                    "speed_error_mps": -ego.speed,
-                    "state": self.state})
-                output.source = "control:" + self.state
-                output.valid = True
-                output.clamp()
-                self.last_output = output
-                return output
+                if ego.speed <= self.settings.hold_speed_mps:
+                    aligned = (not precision or abs(normalize_angle(
+                        ego.heading - trajectory.points[-1].heading)) <=
+                        self.settings.precision_heading_tolerance_rad)
+                    return self._hold_output(output, ego, trajectory,
+                        math.hypot(ego.x - origin.x, ego.y - origin.y) <=
+                        self.settings.precision_arrival_tolerance_m and aligned)
+                return self._braking_output(output, ego, "STOPPING")
+
+            gear_stage = self.direction.update(direction, ego.speed, now, self.settings)
+            if gear_stage is not None:
+                return self._braking_output(output, ego, gear_stage[0], gear_stage[1])
+            if direction * signed_speed < -1e-6:
+                raise ValueError("velocity opposes engaged trajectory direction")
 
             path = PreparedPath(trajectory.points, self.settings.max_segment_m,
                                 self.settings.curve_window_m)
             progress, cross_track, heading_error = path.project(
-                ego.x, ego.y, ego.heading, self.settings)
+                ego.x, ego.y, ego.heading + (math.pi if direction == -1 else 0.0),
+                self.settings,
+                self.settings.precision_arrival_tolerance_m if precision else 0.0)
             reference, remaining = path.speed_reference(progress, trajectory,
                                                         self.settings)
             curve_limit = path.curve_speed_limit(progress, self.settings)
@@ -167,11 +229,12 @@ class ControlEngine(object):
                 "curve_speed_limit_mps": curve_limit,
                 "reference_speed_mps": reference,
                 "speed_error_mps": reference - ego.speed})
-            hold_request = (reference <= self.settings.hold_speed_mps and
-                            ego.speed <= self.settings.hold_speed_mps)
+            hold_speed = (self.settings.precision_speed_mps if precision or direction == -1
+                          else self.settings.hold_speed_mps)
+            hold_request = reference <= hold_speed and ego.speed <= hold_speed
             # At a finite path end there may be no valid forward carrot left,
             # but braking must remain executable while the vehicle is moving.
-            if reference <= self.settings.hold_speed_mps and not hold_request:
+            if reference <= hold_speed and not hold_request:
                 if self.calibration is None:
                     return self._invalid(output, "vehicle calibration required")
                 self.integral, self.release_frames = 0.0, 0
@@ -183,28 +246,30 @@ class ControlEngine(object):
                 output.clamp()
                 self.last_output = output
                 return output
-            if hold_request or self.state == "HOLD":
+            if hold_request or self.state in ("HOLD", "DWELL"):
+                release_speed = (self.settings.precision_speed_mps
+                                 if precision or direction == -1
+                                 else self.settings.hold_release_speed_mps)
                 if (not hold_request and trajectory.target_speed > 0 and
-                        reference >= self.settings.hold_release_speed_mps):
+                        reference >= release_speed):
                     self.release_frames += 1
                 else:
                     self.release_frames = 0
                 if hold_request or self.release_frames < self.settings.hold_release_frames:
-                    self.integral = 0.0
-                    self.state = "HOLD"
-                    output.diagnostics["state"] = self.state
-                    if self.calibration is None:
-                        return self._invalid(output, "vehicle calibration required")
-                    output.brake = self.calibration.hold_brake
-                    output.source = "control:HOLD"
-                    output.valid = True
-                    output.clamp()
-                    self.last_output = output
-                    return output
+                    arrived = (trajectory.stop_required and
+                               0 <= trajectory.stop_distance <=
+                               self.settings.precision_arrival_tolerance_m)
+                    if precision:
+                        arrived = (arrived and cross_track <=
+                                   self.settings.precision_arrival_tolerance_m and
+                                   abs(heading_error) <=
+                                   self.settings.precision_heading_tolerance_rad)
+                    output.diagnostics["stop_pose_arrived"] = arrived
+                    return self._hold_output(output, ego, trajectory, arrived)
                 self.release_frames = 0
 
             curvature, geometry = geometry_request(path, progress, ego,
-                                                    self.settings)
+                                                    self.settings, direction, precision)
             output.diagnostics.update(geometry)
             if self.calibration is None:
                 return self._invalid(output, "vehicle calibration required")

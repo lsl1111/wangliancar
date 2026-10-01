@@ -39,6 +39,24 @@ def validate_output(value, expected, source):
                 or type(value.stop_required) is not bool
                 or not number(value.stop_distance) or value.stop_distance < -1):
             raise ValueError("invalid trajectory fields")
+        direction = getattr(value, "motion_direction", 1)
+        if type(direction) is not int or direction not in (-1, 1):
+            raise ValueError("trajectory direction must be +1 or -1")
+        for name in ("precision_stop", "parking_brake_at_stop",
+                     "left_signal", "right_signal", "hazard_signal"):
+            if type(getattr(value, name, False)) is not bool:
+                raise ValueError("trajectory intent fields must be bool")
+        dwell = getattr(value, "hold_duration_s", 0.0)
+        if not number(dwell) or dwell < 0:
+            raise ValueError("invalid trajectory hold duration")
+        if ((dwell > 0 or getattr(value, "parking_brake_at_stop", False)
+             or getattr(value, "precision_stop", False))
+                and (not value.stop_required or value.stop_distance < 0)):
+            raise ValueError("parking hold requires an explicit stop")
+        if (getattr(value, "left_signal", False) and
+                getattr(value, "right_signal", False) and
+                not getattr(value, "hazard_signal", False)):
+            raise ValueError("opposing turn signals without hazard intent")
         previous = None
         for point in value.points:
             if (not all(number(getattr(point, key)) for key in
@@ -57,8 +75,11 @@ def validate_output(value, expected, source):
         value.clamp()
         if getattr(source, "emergency_stop", False) and (value.throttle != 0 or value.brake <= 0):
             raise ValueError("controller ignored emergency stop")
-        if value.gear == 2 and any(point.speed > 0 for point in source.points):
+        direction = getattr(source, "motion_direction", 1)
+        if value.gear == 2 and direction != -1 and any(point.speed > 0 for point in source.points):
             raise ValueError("reverse gear with forward-only trajectory")
+        if value.gear == 1 and direction == -1 and value.throttle > 0:
+            raise ValueError("drive propulsion with reverse trajectory")
         if value.gear == 3 and any(point.speed > 0 for point in source.points):
             raise ValueError("parking gear with moving trajectory")
     return value
