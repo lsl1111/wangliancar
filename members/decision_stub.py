@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "7002f85+integration-compat"
+DECISION_VERSION = "decision-speed-launch-v2"
 _ENGINE = DecisionEngine()
 
 

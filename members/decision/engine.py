@@ -112,8 +112,9 @@ class DecisionEngine(object):
         ego_speed = float(ego.speed)
         cruising = speed_policy.desired_speed(perception, settings)
 
-        # Optional sensors do not block a lane-only scene. In all scenes stale
-        # lists and Ground Truth remain diagnostic data, never lead evidence.
+        # Only required sensor streams can latch a blind stop. Optional
+        # streams may be absent in lane-only scenes, and stale lists never
+        # count as obstacle evidence.
         targets_fresh = protocol.targets_usable(perception)
         targets_required = requires_targets(perception.scene_id)
         if targets_required and not targets_fresh:
@@ -124,36 +125,15 @@ class DecisionEngine(object):
         else:
             self._blind_fault_count = 0
 
-        # A valid lead must not bypass recovery from an earlier blind stop.
-        # Once latched, first regain required data and slow down, then resume.
         if self._blind_stop:
             if targets_required and not targets_fresh:
                 self._stop(output, "target observations unusable; blind stop latched "
                                    "until standstill", None, self._braking_required(ego_speed))
                 return
             if ego_speed > settings.blind_speed_tolerance:
-                self._stop(output, "recovering from blind stop; still moving",
-                           None, True)
+                self._stop(output, "recovering from blind stop; still moving", None, True)
                 return
             self._blind_stop = False
-
-        # Signal-first arbitration is retained from the delivered algorithm.
-        # Joint arbitration with closer targets remains pending (INTEGRATION.md).
-        traffic = perception.traffic
-        if protocol.traffic_requires_stop(traffic):
-            distance = protocol.traffic_stop_distance(traffic, settings.traffic_stop_margin)
-            if traffic.ambiguous:
-                reason = "signal group unresolved; stop until the applicable lamp is known"
-            elif traffic.observed:
-                reason = "signal state {0}".format(traffic.signal_state)
-            else:
-                reason = "traffic control reported without an observed signal"
-            if distance is None:
-                self._stop(output, reason + "; stop line position unknown, holding",
-                           None, self._braking_required(ego_speed))
-            else:
-                self._stop(output, reason, distance)
-            return
 
         if not protocol.lane_usable(perception):
             if ego_speed > settings.blind_speed_tolerance:
@@ -168,32 +148,59 @@ class DecisionEngine(object):
             if candidate is not None:
                 built.append(candidate)
         lead = candidate_rules.select_lead(built)
+        unverified = candidate_rules.unverified_close_targets(built, settings)
 
         if speed_policy.is_emergency(lead, ego_speed, settings):
             self._stop(output, "obstacle emergency envelope", 0.0, True)
             return
 
+        traffic = perception.traffic
+        if protocol.traffic_requires_stop(traffic):
+            distance = protocol.traffic_stop_distance(traffic, settings.traffic_stop_margin)
+            if traffic.ambiguous:
+                reason = "signal group unresolved; stop until the applicable lamp is known"
+            elif traffic.observed:
+                reason = "signal state {0}".format(traffic.signal_state)
+            else:
+                reason = "traffic control reported without an observed signal"
+            if distance is None:
+                self._stop(output, reason + "; stop line position unknown, holding",
+                           None, self._braking_required(ego_speed))
+                return
+            obstacles = ([lead] if lead is not None else []) + unverified
+            if obstacles:
+                nearest = min(obstacles, key=lambda item:
+                              speed_policy.obstacle_stop_distance(item, settings))
+                obstacle_distance = speed_policy.obstacle_stop_distance(nearest, settings)
+                if obstacle_distance < distance:
+                    distance = obstacle_distance
+                    reason += "; nearer obstacle requires an earlier stop"
+            self._stop(output, reason, distance)
+            return
+
+        if targets_required and not targets_fresh:
+            # The first failed frame does not latch a stop, but it cannot
+            # authorize acceleration or reuse the stale target list.
+            self._cruise(output, min(cruising, ego_speed), perception)
+            output.reason = "target observations temporarily unusable; acceleration held"
+            return
+
         if lead is not None:
             if lead.clearance is None:
-                # The gap behind this target cannot be measured, so neither
-                # following nor a safe approach speed can be justified. Stop
-                # at the configured minimum gap and say the extent is missing.
                 self._stop(output, "same-lane obstacle with unpublished extent; "
                                    "gap unmeasurable, stopping at the minimum gap",
                            speed_policy.obstacle_stop_distance(lead, settings))
                 return
-            # Keep the delivered following policy, while enforcing the same
-            # cruise and published speed ceilings as clear-road driving.
-            self._follow(output, min(cruising, speed_policy.follow_speed(lead, ego, settings)),
+            self._follow(output, speed_policy.follow_speed(lead, ego, cruising, settings),
                          lead, ego_speed)
             return
 
-        unverified = candidate_rules.unverified_close_targets(built, settings)
         if unverified:
             nearest = min(unverified, key=lambda item: item.clearance)
             self._stop(output, "obstacle {0:.1f}m away is not map-verified as in-lane; "
                                "lane membership unknown, stopping instead of guessing"
-                       .format(nearest.clearance))
+                       .format(nearest.clearance),
+                       speed_policy.obstacle_stop_distance(nearest, settings))
             return
 
         self._cruise(output, cruising, perception)

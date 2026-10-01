@@ -59,23 +59,23 @@ def is_emergency(candidate, ego_speed, settings):
     return candidate.ttc <= settings.emergency_ttc
 
 
-def follow_speed(lead, ego, settings):
-    """Target speed behind a lead vehicle.
+def follow_speed(lead, ego, cruising, settings):
+    """Speed demand behind a lead vehicle, capped by gap and braking distance.
 
-    The lead vehicle's own speed is always the ceiling: this member does not
-    drive faster than the vehicle it is following in order to close a gap.
-    Below the ceiling, the approach is bounded by a proportional gap demand.
+    A distant lead permits a bounded approach, including a launch towards a
+    stationary vehicle. The demand decreases as the gap closes and never
+    exceeds the published cruise limit or a provisional braking envelope.
     """
     lead_speed = lead_forward_speed(lead.target, ego)
     if lead.clearance is None:
-        # Target extent unknown: the gap cannot be measured, so only matching
-        # the lead speed is defensible. Braking distance is not guessed.
-        return min(lead_speed, settings.cruise_speed)
-    safe_gap = settings.min_gap + settings.time_headway * lead_speed
-    if lead.clearance <= safe_gap:
-        return min(lead_speed, 0.0)
-    demand = (lead.clearance - safe_gap) / max(settings.time_headway, 1e-6)
-    return max(0.0, min(lead_speed, lead_speed + settings.resume_margin, demand))
+        return 0.0
+    desired_gap = settings.min_gap + settings.time_headway * lead_speed
+    gap_error = lead.clearance - desired_gap - settings.resume_margin
+    demand = max(0.0, lead_speed + gap_error / settings.time_headway)
+    braking_cap = math.sqrt(max(0.0, lead_speed ** 2 +
+                                2.0 * settings.follow_deceleration *
+                                max(0.0, lead.clearance - settings.min_gap)))
+    return min(float(cruising), demand, braking_cap)
 
 
 def obstacle_stop_distance(candidate, settings):

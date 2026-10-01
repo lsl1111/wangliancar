@@ -84,7 +84,8 @@ def unverified_close_targets(candidates, settings):
     """
     close = []
     for candidate in candidates:
-        if candidate.in_lane:
+        if candidate.in_lane or candidate.target.same_lane_valid is True:
+            # A verified adjacent-lane vehicle is not an unknown obstacle.
             continue
         if candidate.clearance is None:
             continue

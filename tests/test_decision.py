@@ -211,6 +211,23 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(DecisionMode.STOP, held.mode)
         self.assertEqual(-1.0, held.stop_distance)
 
+    def test_red_light_uses_nearer_obstacle_stop(self):
+        p = perception(speed=2.0)
+        add_red_light(p, 30.0)
+        add_target(p, longitudinal=15.0, speed=0.0, length=4.0)
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.STOP, result.mode)
+        self.assertEqual(10.0, result.stop_distance)
+        self.assertIn("nearer obstacle", result.reason)
+
+    def test_red_light_does_not_hide_emergency_obstacle(self):
+        p = perception(speed=6.0)
+        add_red_light(p, 30.0)
+        add_target(p, longitudinal=5.0, speed=0.0, length=4.0)
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, result.mode)
+        self.assertEqual(0.0, result.stop_distance)
+
     def test_green_signal_does_not_stop(self):
         p = perception(speed=5.0)
         p.traffic.observed = True
@@ -229,7 +246,7 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(0.0, result.stop_distance)
 
         # 7m of clearance with no closing speed is outside the emergency
-        # envelope: the behaviour is to follow, bounded by the lead speed.
+        # envelope: the behaviour is to follow with a bounded speed demand.
         p = perception(speed=5.0)
         add_target(p, longitudinal=9.0, speed=5.0, length=4.0)
         safe = self.run_engine(p)
@@ -268,14 +285,14 @@ class DecisionTests(unittest.TestCase):
         self.assertGreater(result.target_speed, 0.0)
         self.assertEqual("lane-1", result.target_lane_id)
 
-    def test_following_speed_is_bounded_by_lead_and_cruise(self):
+    def test_following_speed_approaches_distant_lead_and_respects_cruise(self):
         settings = DecisionSettings(cruise_speed=8.0, min_gap=4.0, time_headway=1.2)
-        # Long gap, slower lead: the lead speed is the ceiling, never exceeded.
+        # A long gap permits closing, subject to the cruise ceiling.
         p = perception(speed=6.0)
         add_target(p, longitudinal=40.0, speed=6.0, length=4.0)
         far = self.run_engine(p, settings)
         self.assertEqual(DecisionMode.FOLLOW, far.mode)
-        self.assertEqual(6.0, far.target_speed)
+        self.assertEqual(8.0, far.target_speed)
 
         # Lead at cruise speed, long gap: cruise is allowed.
         p = perception(speed=8.0)
@@ -284,21 +301,28 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(DecisionMode.FOLLOW, cruise.mode)
         self.assertEqual(8.0, cruise.target_speed)
 
-        # Inside the safe gap: hold at the lead speed instead of closing in.
+        # Inside the desired gap: slow below the lead to regain spacing.
         p = perception(speed=6.0)
         add_target(p, longitudinal=10.0, speed=6.0, length=4.0)
         near = self.run_engine(p, settings)
         self.assertEqual(DecisionMode.FOLLOW, near.mode)
-        self.assertLessEqual(near.target_speed, 6.0)
+        self.assertLess(near.target_speed, 6.0)
+
+        # Published limits also constrain following, not just empty-road cruise.
+        p = perception(speed=0.0)
+        p.lane.speed_limit = 3.0
+        add_target(p, longitudinal=40.0, speed=6.0, length=4.0)
+        limited = self.run_engine(p, settings)
+        self.assertEqual(3.0, limited.target_speed)
 
     def test_lead_ahead_at_standstill_does_not_block_the_launch(self):
-        # A stopped lead far ahead must not turn into a standing stop that the
-        # vehicle can never leave; the demand is to hold station behind it.
+        # A stopped lead far ahead leaves enough space to launch towards it.
         p = perception(speed=0.0)
         add_target(p, longitudinal=30.0, speed=0.0, length=4.0)
         result = self.run_engine(p)
         self.assertEqual(DecisionMode.FOLLOW, result.mode)
-        self.assertEqual(0.0, result.target_speed)
+        self.assertGreater(result.target_speed, 0.0)
+        self.assertLessEqual(result.target_speed, DecisionSettings().cruise_speed)
 
         # Once the lead moves, the following demand lets the vehicle follow.
         p = perception(speed=0.0)
@@ -306,7 +330,23 @@ class DecisionTests(unittest.TestCase):
         moving = self.run_engine(p)
         self.assertEqual(DecisionMode.FOLLOW, moving.mode)
         self.assertGreater(moving.target_speed, 0.0)
-        self.assertLessEqual(moving.target_speed, 5.0)
+        self.assertLessEqual(moving.target_speed, DecisionSettings().cruise_speed)
+
+    def test_follow_speed_falls_with_gap_and_obeys_braking_envelope(self):
+        settings = DecisionSettings(cruise_speed=8.0, follow_deceleration=2.0)
+        far = perception(speed=0.0)
+        add_target(far, longitudinal=30.0, speed=0.0)
+        middle = perception(speed=0.0)
+        add_target(middle, longitudinal=20.0, speed=0.0)
+        near = perception(speed=0.0)
+        add_target(near, longitudinal=6.5, speed=0.0)
+        far_speed = self.run_engine(far, settings).target_speed
+        middle_speed = self.run_engine(middle, settings).target_speed
+        near_speed = self.run_engine(near, settings).target_speed
+        self.assertGreater(far_speed, middle_speed)
+        self.assertGreater(middle_speed, near_speed)
+        self.assertEqual(0.0, near_speed)
+        self.assertLessEqual(middle_speed, (2.0 * 2.0 * (18.0 - 4.0)) ** 0.5)
 
     def test_obstacle_without_extent_stops_without_guessing_clearance(self):
         p = perception(speed=0.0)
@@ -342,11 +382,12 @@ class DecisionTests(unittest.TestCase):
                    same_lane_valid=False, lane_id="")
         result = self.run_engine(p)
         self.assertEqual(DecisionMode.STOP, result.mode)
+        self.assertEqual(0.0, result.stop_distance)
         self.assertIn("not map-verified", result.reason)
 
     def test_verified_other_lane_target_is_ignored(self):
         p = perception(speed=5.0)
-        add_target(p, longitudinal=40.0, speed=0.0, length=4.0, lane_id="lane-2")
+        add_target(p, longitudinal=5.0, speed=0.0, length=4.0, lane_id="lane-2")
         result = self.run_engine(p)
         self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
 
@@ -355,6 +396,22 @@ class DecisionTests(unittest.TestCase):
     def test_single_bad_target_frame_does_not_trigger_immediate_blind_stop(self):
         p = perception(speed=4.0, targets_valid=False)
         self.assertEqual(DecisionMode.KEEP_LANE, self.run_engine(p).mode)
+
+    def test_bad_target_frame_does_not_accelerate_or_use_stale_target(self):
+        p = perception(speed=3.0, targets_valid=False)
+        add_target(p, longitudinal=30.0, speed=0.0)
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
+        self.assertEqual(3.0, result.target_speed)
+        self.assertIn("acceleration held", result.reason)
+
+    def test_blind_stop_cannot_be_bypassed_by_stale_target(self):
+        for frame in range(2):
+            p = perception(speed=3.0, targets_valid=False, frame_id=frame)
+            add_target(p, longitudinal=30.0, speed=6.0)
+            result = self.run_engine(p)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, result.mode)
+        self.assertIn("blind stop", result.reason)
 
     def test_repeated_target_failure_latches_a_blind_stop(self):
         for frame in range(2):
