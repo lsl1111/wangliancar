@@ -100,24 +100,22 @@ class ReplayTests(unittest.TestCase):
     def test_replay_reaches_the_behaviour_tree_when_asked_to_revive(self):
         first = self.write("a.json", snapshot(frame=1))
         second = self.write("b.json", snapshot(frame=2, targets=[target_entry()]))
-        report = replay_decision.replay([first, second], DecisionSettings(),
-                                       revive_ttl=5.0)
+        report = replay_decision.replay(
+            [first, second], DecisionSettings(front_offset_m=3.5),
+            revive_ttl=5.0)
         self.assertEqual(1, report["modes"]["KEEP_LANE"])
         self.assertEqual(1, report["modes"]["FOLLOW"])
         self.assertEqual(2, report["counts"]["frames"])
 
     def test_engine_state_continues_across_replayed_frames(self):
-        # The first blind frame is a grace frame; the second latches a blind
-        # stop, and because the ego frame reports 6 m/s it must request
-        # braking. Latching only happens if one engine sees both frames in
-        # order: a per-frame engine would report KEEP_LANE twice.
+        # The first required-source failure already requests protection;
+        # the second distinct GPS frame latches the stop state.
         paths = [self.write("blind_{0}.json".format(i),
                             snapshot(frame=i + 1, targets_valid=False, scene_id=14))
                  for i in range(2)]
         report = replay_decision.replay(paths, DecisionSettings(), revive_ttl=5.0)
-        self.assertEqual(1, report["modes"]["KEEP_LANE"])
-        self.assertEqual(1, report["modes"]["EMERGENCY_BRAKE"])
-        self.assertIn("blind stop", report["frames"][1]["reason"])
+        self.assertEqual(2, report["modes"]["EMERGENCY_BRAKE"])
+        self.assertIn("STOP_LATCHED", report["frames"][1]["reason"])
 
     def test_repeated_gps_frames_are_skipped_by_default(self):
         same = dict(snapshot(frame=7))

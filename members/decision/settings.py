@@ -1,105 +1,99 @@
-"""Decision tuning parameters. Python 3.6; standard library only.
-
-Every value here is a provisional experiment setting, not a measured vehicle
-capability or a competition threshold. See BASELINE.md.
-
-Field tuning can override any parameter without a code change by setting an
-environment variable. This keeps the shared `config/default.ini`, which the
-captain owns, untouched:
-
-    NEVC_DECISION_CRUISE_SPEED=11.1
-    NEVC_DECISION_TIME_HEADWAY=1.5
-"""
+"""Bounded, provisional decision parameters (Python 3.6, standard library)."""
 
 import math
 import os
 
 
-# Environment variable prefix for provisional tuning overrides.
 ENV_PREFIX = "NEVC_DECISION_"
+FIELDS = (
+    "cruise_speed", "min_gap", "time_headway", "gap_gain", "resume_margin",
+    "hold_distance",
+    "follow_deceleration", "reaction_time", "front_offset_m",
+    "emergency_clearance", "emergency_ttc", "static_speed_threshold",
+    "standstill_speed", "blind_speed_tolerance", "traffic_stop_margin",
+    "obstacle_stop_margin", "projection_tolerance_m", "route_ambiguity_m",
+    "conflict_horizon_s", "recovery_frames", "release_frames",
+)
+INT_FIELDS = ("recovery_frames", "release_frames")
+DEPRECATED = ("launch_ttc_cap", "stop_margin")
 
-FIELDS = ("cruise_speed", "min_gap", "time_headway", "resume_margin",
-          "emergency_clearance", "emergency_ttc", "launch_ttc_cap",
-          "stop_margin", "obstacle_stop_margin", "traffic_stop_margin",
-          "blind_speed_tolerance")
 
-
-def _number(value):
+def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def _parse(name, raw):
-    """Parse one override, rejecting rather than silently ignoring bad input."""
-    text = str(raw).strip()
-    if not text:
-        raise ValueError("decision override {0} is empty".format(name))
+def _parse(name, raw, integer=False):
+    value = str(raw).strip()
+    if integer:
+        if not value.isdigit():
+            raise ValueError("decision override {0} must be a positive integer".format(name))
+        return int(value)
     try:
-        value = float(text)
+        result = float(value)
     except ValueError:
-        raise ValueError("decision override {0}={1!r} is not a number".format(name, raw))
-    if not math.isfinite(value):
-        raise ValueError("decision override {0}={1!r} is not finite".format(name, raw))
-    return value
+        raise ValueError("decision override {0} is not numeric".format(name))
+    if not math.isfinite(result):
+        raise ValueError("decision override {0} is not finite".format(name))
+    return result
 
 
 def overrides_from_environment(environ=None):
-    """Return the parameter overrides present in the environment."""
     environ = os.environ if environ is None else environ
+    for name in DEPRECATED:
+        key = ENV_PREFIX + name.upper()
+        if key in environ:
+            raise ValueError("decision override {0} is retired".format(key))
     values = {}
+    if "NEVC_VEHICLE_FRONT_OFFSET_M" in environ:
+        values["front_offset_m"] = _parse("NEVC_VEHICLE_FRONT_OFFSET_M",
+                                          environ["NEVC_VEHICLE_FRONT_OFFSET_M"])
     for name in FIELDS:
         key = ENV_PREFIX + name.upper()
         if key in environ:
-            values[name] = _parse(key, environ[key])
+            values[name] = _parse(key, environ[key], name in INT_FIELDS)
     return values
 
 
 class DecisionSettings(object):
-    def __init__(self, cruise_speed=30.0 / 3.6, min_gap=4.0, time_headway=1.2,
-                 resume_margin=2.0, emergency_clearance=2.0, emergency_ttc=2.0,
-                 launch_ttc_cap=6.0, stop_margin=3.0,
-                 obstacle_stop_margin=3.0, traffic_stop_margin=3.0,
-                 blind_speed_tolerance=0.5):
-        # Desired speed used when no trustworthy speed limit is published.
-        # Perception keeps lane/traffic speed limit at -1 until a real source
-        # exists, so this value is the only speed demand the member owns.
-        self.cruise_speed = cruise_speed
-        # Clearance kept behind a lead vehicle at a standstill (m).
-        self.min_gap = min_gap
-        # Time gap kept behind a moving lead vehicle (s).
-        self.time_headway = time_headway
-        # Extra distance beyond the raw safe gap before following resumes.
-        self.resume_margin = resume_margin
-        # Below this clearance the lead vehicle counts as an emergency (m).
-        self.emergency_clearance = emergency_clearance
-        # Below this time-to-collision the lead vehicle counts as an
-        # emergency (s), once the ego vehicle is actually moving.
-        self.emergency_ttc = emergency_ttc
-        # Time-to-collision is meaningless at a standstill, so the emergency
-        # rule is disabled below the speed that makes the TTC reach this cap.
-        self.launch_ttc_cap = launch_ttc_cap
-        # Declared stop distance is measured from the GPS reference point, so
-        # the occupant margin is subtracted here (provisional responsibility).
-        self.stop_margin = stop_margin
-        self.obstacle_stop_margin = obstacle_stop_margin
-        self.traffic_stop_margin = traffic_stop_margin
-        # While target observations are unusable, resume only below this speed.
-        self.blind_speed_tolerance = blind_speed_tolerance
+    def __init__(self, cruise_speed=30.0 / 3.6, min_gap=4.0,
+                 time_headway=1.2, gap_gain=0.5, resume_margin=2.0,
+                 hold_distance=0.3,
+                 follow_deceleration=2.0, reaction_time=0.3,
+                 front_offset_m=None, emergency_clearance=2.0,
+                 emergency_ttc=2.0, static_speed_threshold=0.3,
+                 standstill_speed=0.1, blind_speed_tolerance=0.5,
+                 traffic_stop_margin=3.0, obstacle_stop_margin=3.0,
+                 projection_tolerance_m=2.5, route_ambiguity_m=2.0,
+                 conflict_horizon_s=3.0, recovery_frames=3,
+                 release_frames=2):
+        for name in FIELDS:
+            setattr(self, name, locals()[name])
 
     def validate(self):
         for name in FIELDS:
             value = getattr(self, name)
-            if not _number(value) or value < 0.0:
+            if name in INT_FIELDS:
+                if type(value) is not int or value < 1:
+                    raise ValueError("decision setting {0} must be a positive integer".format(name))
+                continue
+            if name == "front_offset_m" and value is None:
+                continue
+            if not _finite(value) or value < 0.0:
                 raise ValueError("decision setting {0} must be finite and nonnegative".format(name))
-        if self.cruise_speed <= 0.0:
-            raise ValueError("cruise_speed must be positive")
-        if self.emergency_ttc <= 0.0 or self.launch_ttc_cap <= 0.0:
-            raise ValueError("time-to-collision limits must be positive")
-        if self.resume_margin <= 0.0:
-            raise ValueError("resume_margin must be positive")
+        for name in ("cruise_speed", "time_headway", "gap_gain", "resume_margin", "follow_deceleration",
+                     "emergency_ttc", "static_speed_threshold", "blind_speed_tolerance",
+                     "projection_tolerance_m", "route_ambiguity_m", "conflict_horizon_s"):
+            if getattr(self, name) <= 0.0:
+                raise ValueError("decision setting {0} must be positive".format(name))
+        if self.front_offset_m is not None and self.front_offset_m <= 0.0:
+            raise ValueError("measured front offset must be positive")
+        if self.standstill_speed >= self.blind_speed_tolerance:
+            raise ValueError("standstill_speed must be below blind_speed_tolerance")
+        if self.hold_distance >= self.resume_margin:
+            raise ValueError("hold_distance must be below resume_margin")
         return self
 
     def replace(self, **overrides):
-        """Return a validated copy with the named parameters replaced."""
         values = dict((name, getattr(self, name)) for name in FIELDS)
         for name, value in overrides.items():
             if name not in values:
@@ -109,7 +103,6 @@ class DecisionSettings(object):
 
     @classmethod
     def from_environment(cls, environ=None, **overrides):
-        """Build settings from the environment, then apply explicit overrides."""
         values = overrides_from_environment(environ)
         values.update(overrides)
         return cls().replace(**values)

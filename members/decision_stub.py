@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "7002f85+integration-compat"
+DECISION_VERSION = "decision-constraints-v4"
 _ENGINE = DecisionEngine()
 
 
@@ -15,7 +15,8 @@ def reset_decision(settings=None):
 def decision_info():
     """Expose the running implementation and tuning for launcher diagnostics."""
     return {"version": DECISION_VERSION, "engine": type(_ENGINE).__name__,
-            "cruise_speed": float(_ENGINE.settings.cruise_speed)}
+            "cruise_speed": float(_ENGINE.settings.cruise_speed),
+            "front_offset_m": _ENGINE.settings.front_offset_m}
 
 
 def decide(perception):

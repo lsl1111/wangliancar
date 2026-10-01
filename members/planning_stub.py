@@ -1,4 +1,4 @@
-"""Fixed planning entry for the clear-road lane-reference baseline."""
+"""Fixed planning entry for the lane reference and guarded obstacles."""
 
 from members.planning.lane_planner import build_trajectory
 
