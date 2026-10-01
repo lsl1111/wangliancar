@@ -7,6 +7,7 @@
 ## 当前已经做到
 
 - 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS，并按场景传感器配置读取目标；目标传感器不可用时 Ground Truth 仅作诊断回退。
+- 目标接入兼容数字传感器类型，支持官方回调发现实际 ID、已知源间读取切换及失败重试；日志区分缺少配置、读取失败和有效空目标帧，见 [目标接入说明](perception/TARGET_DATA_INGESTION.md)。
 - 加载 HD Map，输出当前车道号、中心线、左右邻车道、车道宽度和车辆相对车道误差；另输出连接位置和方向已核对的唯一后继车道参考线，供规划跨车道段连续前进。分叉路线仍需上游明确选择，详见 [路线接续说明](perception/ROUTE_CONTINUATION.md)。
 - 自动从案例名称识别场景编号，例如 `06.车道居中控制-测试` 识别为场景 6。
 - 每一帧生成统一的 `Perception`，写入 `runtime_data/latest_perception.json`，方便全队直接查看。

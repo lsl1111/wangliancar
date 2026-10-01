@@ -15,6 +15,7 @@ from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, ROUTE_REFERENCE_VERSION
 from simone_platform.simone_adapter import SimOneAdapter
+from simone_platform.sensor_catalog import TARGET_INGESTION_VERSION
 
 
 def _member_output(value, expected, source):
@@ -42,6 +43,7 @@ class CaptainRuntime(object):
         reset_decision()
         self.runtime_info = decision_info()
         self.runtime_info.update({"pid": os.getpid(),
+                                  "target_ingestion_version": TARGET_INGESTION_VERSION,
                                   "route_reference_version": ROUTE_REFERENCE_VERSION,
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
@@ -181,14 +183,24 @@ class CaptainRuntime(object):
                                        safety)
             processed += 1
             if processed == 1 or processed % 100 == 0:
+                target_status = perception.source_status.get("targets", {})
+                targets_usable = (perception.targets_valid
+                                  and isinstance(perception.target_source, str)
+                                  and perception.target_source.startswith("sensor:")
+                                  and target_status.get("usable", False))
                 self.logger.info(
-                    "frame=%s valid=%s lane=%s targets=%s speed=%.2fm/s decision=%s trajectory=%s control=%s send=%s reason=%s",
+                    "frame=%s valid=%s lane=%s targets=%s target_source=%s targets_usable=%s "
+                    "target_reason=%s speed=%.2fm/s decision=%s mode=%s decision_reason=%s "
+                    "trajectory=%s control=%s send=%s reason=%s",
                     perception.frame_id,
                     perception.valid,
                     perception.lane.lane_id,
                     len(perception.targets),
+                    perception.target_source, targets_usable,
+                    target_status.get("reason", "unknown"),
                     perception.ego.speed,
-                    decision.valid, trajectory.valid, control.valid, receipt["reason"],
+                    decision.valid, decision.mode, decision.reason,
+                    trajectory.valid, control.valid, receipt["reason"],
                     trajectory.reason if not trajectory.valid else "; ".join(control.errors),
                 )
             if once:

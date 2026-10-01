@@ -75,7 +75,7 @@ def analyze_frames(frames, scene_id, minimum=20):
     target_required = requires_targets(scene_id)
     failures, warnings = [], []
     counts = {"gps_ok": 0, "targets_ok": 0, "lane_ok": 0,
-              "sensor_config_ok": 0, "target_frames_with_objects": 0,
+              "sensor_config_ok": 0, "target_id_verified": 0, "target_frames_with_objects": 0,
               "traffic_frames": 0, "sign_frames": 0, "route_frames": 0}
     seen_ids, seen_cases, seen_sources = set(), set(), set()
     last_frame = None
@@ -136,6 +136,13 @@ def analyze_frames(frames, scene_id, minimum=20):
                 and any(isinstance(c, dict) and c.get("id") == source.split(":", 1)[1]
                         for c in configurations if source.startswith("sensor:"))):
             counts["sensor_config_ok"] += 1
+            counts["target_id_verified"] += 1
+        elif (source.startswith("sensor:") and targets_status.get("id_verified") is True
+              and source.split(":", 1)[1] in targets_status.get("callback_sensor_ids", [])
+              and targets_status.get("sensor_read_ok") is True):
+            # The actual official callback is ID evidence, not a claim that the
+            # scenario's static configuration query succeeded.
+            counts["target_id_verified"] += 1
         if _dict(item.get("traffic")).get("valid") is True:
             counts["traffic_frames"] += 1
         if item.get("traffic_signs_valid") is True and item.get("traffic_signs"):
@@ -152,8 +159,10 @@ def analyze_frames(frames, scene_id, minimum=20):
             counts["targets_ok"], total))
     if counts["lane_ok"] != total:
         failures.append("HD-map lane usable in {0}/{1} frames".format(counts["lane_ok"], total))
-    if target_required and total and counts["sensor_config_ok"] == 0:
-        failures.append("target sensor ID was not confirmed in sensor configurations")
+    if target_required and total and counts["target_id_verified"] == 0:
+        failures.append("target sensor ID was not confirmed by configurations or official callbacks")
+    if target_required and counts["target_id_verified"] and not counts["sensor_config_ok"]:
+        warnings.append("sensor ID verified by official callback; configuration query remains unavailable")
     if len(seen_cases) > 1:
         failures.append("case identity changed during capture")
     contract_gaps = {
@@ -187,9 +196,13 @@ def analyze_frames(frames, scene_id, minimum=20):
 
 def collect(snapshot_path, count, timeout_sec):
     frames, last_frame = [], None
+    started_at = time.time()
     deadline = time.monotonic() + timeout_sec
     while len(frames) < count and time.monotonic() < deadline:
         try:
+            if os.path.getmtime(snapshot_path) < started_at:
+                time.sleep(0.05)
+                continue  # A previous run's JSON is not a live data frame.
             # Atomic publisher replacement means each read sees a whole JSON file.
             with open(snapshot_path, "r", encoding="utf-8") as stream:
                 item = json.load(stream)
