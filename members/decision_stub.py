@@ -1,45 +1,18 @@
-"""Replace only decide() when the decision member delivers their module."""
+"""Fixed decision entry. Replace only the engine behind decide()."""
 
-from core.interfaces import DecisionMode, DecisionTarget
-from core.validation import current
+from members.decision.engine import DecisionEngine
+
+_ENGINE = DecisionEngine()
 
 
 def decide(perception):
-    output = DecisionTarget().bind(perception)
-    if (not current(perception) or not perception.ego.valid or
-            not perception.source_status.get("gps", {}).get("usable", False)):
-        output.mode = DecisionMode.STOP
-        output.reason = "perception invalid"
-        return output
-    output.mode = DecisionMode.KEEP_LANE
-    output.target_speed = perception.ego.speed
-    output.target_lane_id = perception.lane.lane_id
-    output.reason = "integration baseline: hold current speed; no autonomous launch"
-    output.valid = True
-    if not perception.targets_valid or not perception.lane.valid:
-        output.mode, output.target_speed = DecisionMode.EMERGENCY_BRAKE, 0.0
-        output.reason = "required perception source unavailable"
-        return output
-    limits = [v for v in (perception.lane.speed_limit, perception.traffic.speed_limit) if v >= 0]
-    if limits:
-        output.target_speed = min([output.target_speed] + limits)
-    traffic = perception.traffic
-    if traffic.observed and (traffic.ambiguous or traffic.signal_state != "GREEN"):
-        output.mode, output.target_speed = DecisionMode.STOP, 0.0
-        output.stop_distance = max(0.0, traffic.stop_line_distance - 3.0)
-        output.reason = "stop before signal; 3m GPS-reference margin"
-    for target in perception.targets:
-        # Unknown map membership is not evidence that an obstacle is off-lane.
-        relevant = target.same_lane or (not target.same_lane_valid and target.lateral_band_match)
-        if not target.valid or not relevant or target.longitudinal_distance <= 0:
-            continue
-        clearance = max(0.0, target.longitudinal_distance - target.length * 0.5 - 3.0)
-        if clearance <= 2.0 or (0 <= target.ttc <= 2.0):
-            output.mode, output.target_speed = DecisionMode.EMERGENCY_BRAKE, 0.0
-            output.stop_distance, output.reason = 0.0, "obstacle emergency envelope"
-            return output
-        if output.stop_distance < 0 or clearance < output.stop_distance:
-            output.stop_distance = clearance
-            output.mode, output.target_speed = DecisionMode.STOP, 0.0
-            output.reason = "conservative obstacle stop; following policy not implemented"
-    return output
+    """Choose a behaviour for one perception frame.
+
+    Input:  Perception (captain)
+    Output: DecisionTarget (planning member)
+
+    The engine is module-level so its anti-flapping state survives between
+    frames. See members/decision/BASELINE.md for the behaviour table and the
+    parameters that are still provisional.
+    """
+    return _ENGINE.run(perception)
