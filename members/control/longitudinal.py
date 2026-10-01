@@ -6,7 +6,11 @@ import math
 def pedal_request(speed, reference, integral, dt, settings, calibration,
                   acceleration=0.0):
     error = reference - speed
-    if abs(error) <= settings.control_deadband_mps:
+    # A fixed 0.08 m/s deadband would suppress every positive demand at a
+    # smaller crawl speed, including parking corrections after a stop.
+    deadband = min(settings.control_deadband_mps,
+                   max(0.0, reference) * settings.crawl_deadband_ratio)
+    if abs(error) <= deadband:
         error = 0.0
     proposal = max(-settings.integral_limit,
                    min(settings.integral_limit, integral + error * dt))

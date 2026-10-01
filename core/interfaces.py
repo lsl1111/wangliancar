@@ -239,6 +239,17 @@ class Trajectory(FrameOutput):
         self.stop_required = False
         self.stop_distance = -1.0
         self.target_lane_id = ""
+        # Points follow travel order; speed is a nonnegative magnitude. Ego
+        # heading remains body yaw. A segment has one explicit direction.
+        self.motion_direction = 1  # +1 forward, -1 reverse; never raw GPS gear
+        self.precision_stop = False
+        # Minimum continuous standstill at the requested stop, in seconds.
+        self.hold_duration_s = 0.0
+        self.parking_brake_at_stop = False
+        # Explicit upstream intentions; steering does not imply a turn signal.
+        self.left_signal = False
+        self.right_signal = False
+        self.hazard_signal = False
         self.reason = ""
         self.valid = False
 

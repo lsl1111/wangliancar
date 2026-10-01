@@ -1,4 +1,4 @@
-"""Spatial path sampling for the forward-only controller (metres, m/s)."""
+"""Spatial path sampling in travel order (metres, speed magnitudes in m/s)."""
 
 import math
 from bisect import bisect_left
@@ -14,9 +14,10 @@ class PreparedPath(object):
     def __init__(self, points, max_segment_m, curve_window_m=3.0):
         self.points = []
         self.arc = []
+        self.headings = []
         for point in points:
             x, y, speed = point.x, point.y, point.speed
-            if not all(_finite(value) for value in (x, y, speed)) or speed < 0:
+            if not all(_finite(value) for value in (x, y, speed, point.heading)) or speed < 0:
                 raise ValueError("invalid path point")
             if self.points:
                 previous = self.points[-1]
@@ -25,6 +26,7 @@ class PreparedPath(object):
                     # A repeated position may carry a lower speed limit.
                     self.points[-1] = (previous[0], previous[1],
                                        min(previous[2], float(speed)))
+                    self.headings[-1] = float(point.heading)
                     continue
                 if distance > max_segment_m:
                     raise ValueError("path segment gap exceeds bound")
@@ -32,6 +34,7 @@ class PreparedPath(object):
             else:
                 self.arc.append(0.0)
             self.points.append((float(x), float(y), float(speed)))
+            self.headings.append(float(point.heading))
         if len(self.points) < 2 or self.arc[-1] <= 1e-6:
             raise ValueError("path has no forward geometry")
         self.curvatures = [self.curvature_at(s, curve_window_m)
@@ -41,7 +44,12 @@ class PreparedPath(object):
     def length(self):
         return self.arc[-1]
 
-    def project(self, x, y, heading, settings):
+    def project(self, x, y, heading, settings, end_tolerance_m=0.0,
+                progress_hint=None, max_progress_delta=None):
+        if (progress_hint is not None and
+                (not _finite(progress_hint) or not _finite(max_progress_delta)
+                 or max_progress_delta < 0)):
+            raise ValueError("invalid path progress hint")
         candidates = []
         for index in range(len(self.points) - 1):
             ax, ay = self.points[index][:2]
@@ -52,15 +60,22 @@ class PreparedPath(object):
             ratio = max(0.0, min(1.0, raw))
             px, py = ax + ratio * dx, ay + ratio * dy
             distance = math.hypot(x - px, y - py)
-            candidates.append((distance, self.arc[index] + ratio * segment,
-                               math.atan2(dy, dx), index, raw))
+            progress = self.arc[index] + ratio * segment
+            if progress_hint is not None:
+                if (progress < progress_hint - settings.projection_progress_slack_m or
+                        progress > progress_hint + max_progress_delta):
+                    continue
+            candidates.append((distance, progress, math.atan2(dy, dx), index, raw))
+        if not candidates:
+            raise ValueError("no projection within reachable path progress")
         candidates.sort(key=lambda item: item[0])
         best = candidates[0]
         if best[0] > settings.max_projection_error_m:
             raise ValueError("vehicle too far from planned path")
         if abs(normalize_angle(best[2] - heading)) > settings.max_heading_error_rad:
             raise ValueError("path direction opposes vehicle")
-        if best[3] == len(self.points) - 2 and best[4] > 1.0:
+        if (best[3] == len(self.points) - 2 and best[4] > 1.0
+                and best[0] > end_tolerance_m):
             raise ValueError("vehicle beyond path end")
         for other in candidates[1:]:
             if (other[0] <= best[0] + 0.15 and
@@ -76,6 +91,14 @@ class PreparedPath(object):
         first, second = self.points[index], self.points[index + 1]
         return tuple(first[k] + ratio * (second[k] - first[k])
                      for k in range(3))
+
+    def heading_at(self, s):
+        """Interpolate requested body yaw across +/-pi without a full turn."""
+        s = max(0.0, min(self.length, s))
+        index = max(0, min(len(self.arc) - 2, bisect_left(self.arc, s) - 1))
+        ratio = (s - self.arc[index]) / (self.arc[index + 1] - self.arc[index])
+        return normalize_angle(self.headings[index] + ratio *
+                               normalize_angle(self.headings[index + 1] - self.headings[index]))
 
     def curvature_at(self, s, window_m=3.0):
         """Signed path curvature from three equally spaced arc samples."""
@@ -124,14 +147,24 @@ class PreparedPath(object):
                                      2.0 * settings.launch_accel_mps2 *
                                      max(0.0, preview_s - s))
             local = max(local, min(preview_speed, launch_limit))
-        remaining = max(0.0, self.length - s - settings.path_end_margin_m)
-        limit = min(local, settings.max_track_speed_mps,
+        precision = getattr(trajectory, "precision_stop", False)
+        margin = settings.precision_end_margin_m if precision else settings.path_end_margin_m
+        max_speed = (settings.max_reverse_speed_mps
+                     if getattr(trajectory, "motion_direction", 1) == -1
+                     else settings.max_track_speed_mps)
+        remaining = max(0.0, self.length - s - margin)
+        limit = min(local, max_speed,
                     math.sqrt(2.0 * settings.preview_decel_mps2 * remaining))
         if trajectory.stop_required:
             if not _finite(trajectory.stop_distance) or trajectory.stop_distance < 0:
                 raise ValueError("stop distance missing")
-            stop_remaining = max(0.0, trajectory.stop_distance - settings.path_end_margin_m)
+            stop_remaining = max(0.0, trajectory.stop_distance - margin)
             limit = min(limit, math.sqrt(2.0 * settings.preview_decel_mps2 * stop_remaining))
+            if precision:
+                # Creep to a precise endpoint instead of using the general
+                # half-metre path-coverage margin. Never raises a point limit.
+                limit = min(limit, settings.precision_approach_gain_per_s *
+                            min(remaining, stop_remaining))
         if not trajectory.stop_required or trajectory.target_speed > 0:
             limit = min(limit, trajectory.target_speed)
         for index, future_s in enumerate(self.arc):
@@ -162,8 +195,10 @@ class PreparedPath(object):
             # subtract the virtual preview travel without mutating input.
             future, _ = self.speed_reference(s + distance, trajectory, settings)
             if trajectory.stop_required:
-                stop = max(0.0, trajectory.stop_distance - distance -
-                           settings.path_end_margin_m)
+                margin = (settings.precision_end_margin_m
+                          if getattr(trajectory, "precision_stop", False)
+                          else settings.path_end_margin_m)
+                stop = max(0.0, trajectory.stop_distance - distance - margin)
                 future = min(future, math.sqrt(2.0 * settings.preview_decel_mps2 * stop))
         future = min(future, self.curve_speed_limit(s + distance, settings))
         acceleration = (future * future - initial * initial) / (2.0 * distance)
