@@ -1,7 +1,7 @@
-"""Fixed planning integration entry; replace preview with member planner."""
+"""Fixed planning entry for the clear-road lane-reference baseline."""
 
-from members.planning.reference_preview import build_preview
+from members.planning.lane_planner import build_trajectory
 
 
 def plan(perception, decision):
-    return build_preview(perception, decision)
+    return build_trajectory(perception, decision)

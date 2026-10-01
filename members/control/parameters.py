@@ -57,8 +57,8 @@ class ControllerSettings(object):
         self.lookahead_max_m = 10.0
         self.curve_lookahead_gain_m = 4.0
         self.curve_window_m = 3.0
+        self.steering_preview_s = 0.15
         self.max_lateral_accel_mps2 = 1.5
-        self.min_curve_speed_mps = 0.8
         self.turn_exit_margin_m = 1.0
         self.max_segment_m = 12.0
         self.max_projection_error_m = 2.0
@@ -67,9 +67,13 @@ class ControllerSettings(object):
         self.preview_decel_mps2 = 2.0
         self.launch_preview_m = 1.0
         self.launch_accel_mps2 = 1.0
-        self.max_track_speed_mps = 8.0
+        self.max_track_speed_mps = 30.0 / 3.6
         self.pi_kp = 1.0
         self.pi_ki = 0.25
+        # Convert profile acceleration (m/s^2) to PI demand (m/s). Trial gain;
+        # it is not an inverse model of SimOne's engine or brake system.
+        self.acceleration_feedforward_s = 0.5
+        self.acceleration_preview_m = 1.0
         self.integral_limit = 3.0
         self.control_deadband_mps = 0.08
         self.hold_speed_mps = 0.2
@@ -79,3 +83,21 @@ class ControllerSettings(object):
         self.throttle_slew_per_s = 1.0
         self.brake_slew_per_s = 1.5
         self.max_dt_s = 0.5
+
+    def validate(self):
+        nonnegative = {"curve_lookahead_gain_m", "steering_preview_s",
+                       "acceleration_feedforward_s", "pi_ki"}
+        for name, value in vars(self).items():
+            if name == "hold_release_frames":
+                if type(value) is not int or value < 1:
+                    raise ValueError("hold_release_frames must be a positive integer")
+                continue
+            if (type(value) not in (int, float) or not math.isfinite(value)
+                    or value < 0 or (name not in nonnegative and value == 0)):
+                raise ValueError(name + " outside finite algorithm bounds")
+        if (self.lookahead_min_m > self.lookahead_max_m or
+                self.hold_speed_mps >= self.hold_release_speed_mps or
+                self.max_heading_error_rad > math.pi / 2 or
+                self.steering_preview_s > 0.5):
+            raise ValueError("inconsistent controller bounds")
+        return self

@@ -28,6 +28,20 @@ def chain(frame=1):
 
 
 class SafetySupervisorTests(unittest.TestCase):
+    def test_brake_only_command_never_copies_raw_gearbox_position(self):
+        for feedback in (-1, 0, 1, 2, 3, 6):
+            with self.subTest(feedback=feedback):
+                self.safety.reset()
+                p, d, t = chain()
+                p.ego.gear = feedback
+                t.valid = False
+                result = self.safety.evaluate(p, d, t)
+                self.assertTrue(result.control.valid)
+                self.assertEqual(0, result.control.gear)
+                self.assertEqual(0.0, result.control.throttle)
+                self.assertGreater(result.control.brake, 0.0)
+                self.assertEqual(feedback, p.ego.gear)
+
     def setUp(self):
         self.now = time.monotonic()
         config = SimpleNamespace(pipeline_timeout_ms=200, sensor_timeout_ms=500,

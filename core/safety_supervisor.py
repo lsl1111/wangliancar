@@ -114,8 +114,7 @@ class SafetySupervisor(object):
         gps_ok = (current(perception) and getattr(perception.ego, "valid", False)
                   and isinstance(gps_status, dict) and gps_status.get("usable") is True)
         if (gps_ok and new_frame and 0 <= perception.ego.age_ms < self.repeat_fault_ms):
-            self.last_good_header = (perception.frame_id, perception.timestamp,
-                                     perception.ego.gear)
+            self.last_good_header = (perception.frame_id, perception.timestamp)
             self.last_good_at = now
 
         mode, reason = "normal", ""
@@ -166,7 +165,7 @@ class SafetySupervisor(object):
         if (self.last_good_at is None or
                 (now - self.last_good_at) * 1000.0 > self.last_gps_ms):
             return None
-        frame, timestamp, gear = self.last_good_header
+        frame, timestamp = self.last_good_header
         if type(frame) is not int or frame < 0 or type(timestamp) is not int or timestamp < 0:
             return None
         output = ControlOut()
@@ -178,7 +177,9 @@ class SafetySupervisor(object):
             output.valid_until = min(output.valid_until, source_deadline)
         if output.valid_until <= now:
             return None
-        output.gear = gear if type(gear) is int and gear in (0, 1, 2, 3) else 0
+        # Brake-only override: never reinterpret raw GPS gearbox positions as
+        # control commands (GPS 2 would incorrectly command Reverse=2).
+        output.gear = 0
         output.throttle = 0.0
         output.brake = (self.controlled_brake if mode == "controlled_stop"
                         else self.emergency_brake)

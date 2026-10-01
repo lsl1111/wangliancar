@@ -1,4 +1,4 @@
-"""Forward-only Pure Pursuit + PI controller with explicit arming data.
+"""Forward Pure Pursuit + PI/profile-feedforward control with explicit arming.
 
 The engine computes spatial diagnostics before calibration, but never marks a
 pedal/steering command valid until vehicle-specific mapping is supplied.
@@ -10,7 +10,7 @@ import time
 from core.interfaces import ControlOut, Trajectory
 from core.validation import current, validate_output
 from members.control.lateral import geometry_request, steering_request
-from members.control.longitudinal import pedal_request
+from members.control.longitudinal import pedal_request, applied_integral
 from members.control.parameters import ControllerSettings
 from members.control.trajectory import PreparedPath
 
@@ -35,7 +35,7 @@ def _stationary_stop(trajectory):
 class ControlEngine(object):
     def __init__(self, calibration=None, settings=None, clock=None):
         self.calibration = calibration
-        self.settings = settings or ControllerSettings()
+        self.settings = (settings or ControllerSettings()).validate()
         self.clock = clock or time.monotonic
         self.reset()
 
@@ -72,13 +72,13 @@ class ControlEngine(object):
                 self.case = case
             if (type(perception.frame_id) is not int or
                     (self.last_frame is not None and
-                     perception.frame_id <= self.last_frame)):
+                     perception.frame_id < self.last_frame)):
                 return self._invalid(output, "non-increasing perception frame")
             dt = 0.0 if self.last_time is None else now - self.last_time
-            if self.last_time is not None and (dt <= 0 or dt > self.settings.max_dt_s):
+            if self.last_time is not None and (dt < 0 or dt > self.settings.max_dt_s or
+                    (dt == 0 and perception.frame_id != self.last_frame)):
                 self.last_frame, self.last_time = perception.frame_id, now
                 return self._invalid(output, "control loop dt outside bound")
-            self.last_frame, self.last_time = perception.frame_id, now
             if not current(perception) or not perception.ego.valid:
                 raise ValueError("ego perception invalid or expired")
             gps_status = perception.source_status.get("gps", {})
@@ -90,10 +90,21 @@ class ControlEngine(object):
                     not all(_finite(getattr(ego, name)) for name in
                             ("x", "y", "heading", "speed")) or ego.speed < 0):
                 raise ValueError("ego pose or speed invalid")
-            if type(ego.gear) is not int or ego.gear not in (0, 1, 2, 3):
-                raise ValueError("invalid automatic gear")
+            if type(ego.gear) is not int:
+                raise ValueError("invalid GPS gear position")
             validate_output(trajectory, Trajectory, perception)
-            output.gear = ego.gear
+            if perception.frame_id == self.last_frame:
+                # Runtime must not resend a normal command on a repeated GPS
+                # frame. Keep PI/slew/HOLD memory until a genuinely new frame;
+                # expiry and stalling remain checked above and by supervisor.
+                output.source = "control:DUPLICATE"
+                output.errors.append("duplicate perception frame; no new command")
+                output.diagnostics["state"] = self.state
+                return output
+            self.last_frame, self.last_time = perception.frame_id, now
+            # A raw gearbox position cannot be used as an N/D/R/P command.
+            # Brake-only output uses Neutral; forward tracking requests Drive.
+            output.gear = 0
             output.diagnostics["dt_s"] = dt
             if trajectory.emergency_stop:
                 self.integral = 0.0
@@ -109,8 +120,14 @@ class ControlEngine(object):
                 self.last_output = output
                 return output
 
-            if ego.gear != 1:
-                raise ValueError("only forward Drive gear is supported for tracking")
+            if (not all(_finite(getattr(ego, name)) for name in ("vx", "vy"))
+                    or ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -1e-6):
+                raise ValueError("reverse or invalid velocity is unsupported for forward tracking")
+            # Keep observed gearbox positions intact; the forward trajectory
+            # supplies the intent, and signed velocity rejects reverse motion.
+            output.gear = 1
+            output.diagnostics["observed_gear"] = ego.gear
+            output.diagnostics["requested_gear"] = output.gear
             if _stationary_stop(trajectory):
                 origin = trajectory.points[0]
                 if math.hypot(ego.x - origin.x, ego.y - origin.y) > self.settings.max_projection_error_m:
@@ -143,6 +160,7 @@ class ControlEngine(object):
             reference = min(reference, curve_limit)
             if trajectory.stop_required and trajectory.target_speed == 0:
                 reference = min(reference, ego.speed)
+                self.integral = min(0.0, self.integral)
             output.diagnostics.update({
                 "path_progress_m": progress, "path_remaining_m": remaining,
                 "cross_track_abs_m": cross_track, "heading_error_rad": heading_error,
@@ -151,8 +169,23 @@ class ControlEngine(object):
                 "speed_error_mps": reference - ego.speed})
             hold_request = (reference <= self.settings.hold_speed_mps and
                             ego.speed <= self.settings.hold_speed_mps)
+            # At a finite path end there may be no valid forward carrot left,
+            # but braking must remain executable while the vehicle is moving.
+            if reference <= self.settings.hold_speed_mps and not hold_request:
+                if self.calibration is None:
+                    return self._invalid(output, "vehicle calibration required")
+                self.integral, self.release_frames = 0.0, 0
+                self.state = "STOPPING"
+                output.brake = self.calibration.max_brake
+                output.steering = (self.last_output.steering if self.last_output else 0.0)
+                output.diagnostics["state"] = self.state
+                output.source, output.valid = "control:STOPPING", True
+                output.clamp()
+                self.last_output = output
+                return output
             if hold_request or self.state == "HOLD":
-                if not hold_request and not trajectory.stop_required and reference >= self.settings.hold_release_speed_mps:
+                if (not hold_request and trajectory.target_speed > 0 and
+                        reference >= self.settings.hold_release_speed_mps):
                     self.release_frames += 1
                 else:
                     self.release_frames = 0
@@ -177,9 +210,16 @@ class ControlEngine(object):
                 return self._invalid(output, "vehicle calibration required")
             steering, front_angle = steering_request(curvature, self.calibration)
             output.diagnostics["front_angle_rad"] = front_angle
+            acceleration = path.acceleration_reference(
+                progress, trajectory, self.settings, reference)
+            if trajectory.stop_required and trajectory.target_speed == 0:
+                acceleration = min(0.0, acceleration)
             throttle, brake, next_integral, speed_error = pedal_request(
                 ego.speed, reference, self.integral, dt,
-                self.settings, self.calibration)
+                self.settings, self.calibration, acceleration)
+            if trajectory.stop_required and trajectory.target_speed == 0:
+                throttle = 0.0
+            requested_throttle, requested_brake = throttle, brake
             if self.last_output is not None and dt > 0:
                 steering = _approach(self.last_output.steering, steering,
                                      self.settings.steering_slew_per_s * dt)
@@ -193,11 +233,17 @@ class ControlEngine(object):
                 throttle = 0.0
             if throttle > 0:
                 brake = 0.0
+            next_integral = applied_integral(
+                self.integral, next_integral, speed_error,
+                requested_throttle, requested_brake, throttle, brake,
+                self.calibration)
             output.throttle, output.brake, output.steering = throttle, brake, steering
             output.diagnostics["speed_error_mps"] = speed_error
             output.diagnostics["integral_m"] = next_integral
+            output.diagnostics["reference_acceleration_mps2"] = acceleration
             self.integral = next_integral
-            self.state = "STOPPING" if trajectory.stop_required else "TRACK"
+            self.state = ("STOPPING" if trajectory.stop_required and
+                          trajectory.target_speed == 0 else "TRACK")
             output.diagnostics["state"] = self.state
             output.source = "control:" + self.state
             output.valid = True

@@ -103,9 +103,8 @@ class PreparedPath(object):
         for turn_s, curvature in zip(self.arc, self.curvatures):
             if turn_s < s - settings.turn_exit_margin_m or abs(curvature) <= 1e-6:
                 continue
-            turn_speed = max(settings.min_curve_speed_mps,
-                             math.sqrt(settings.max_lateral_accel_mps2 /
-                                       abs(curvature)))
+            # A crawl-speed floor must not override a lateral-acceleration cap.
+            turn_speed = math.sqrt(settings.max_lateral_accel_mps2 / abs(curvature))
             distance = max(0.0, turn_s - s)
             limit = min(limit, math.sqrt(turn_speed * turn_speed +
                                          2.0 * settings.preview_decel_mps2 * distance))
@@ -114,9 +113,11 @@ class PreparedPath(object):
     def speed_reference(self, s, trajectory, settings):
         """Point speed with future slowdowns and known path end as upper bounds."""
         local = self.sample(s)[2]
-        # A moving profile may start at the measured speed of zero. Look just
-        # ahead for its first positive speed so the controller can leave HOLD.
-        if local <= settings.hold_speed_mps and trajectory.target_speed > 0:
+        # A rolling profile starts at measured speed, not at cruise speed.
+        # Preview the rising first segment throughout acceleration, otherwise
+        # PI sees zero error on every replan and never reaches cruise speed.
+        # An interior zero-speed constraint is never bypassed this way.
+        if s <= 1e-6 and trajectory.target_speed > 0:
             preview_s = min(self.length, s + settings.launch_preview_m)
             preview_speed = self.sample(preview_s)[2]
             launch_limit = math.sqrt(local * local +
@@ -141,3 +142,30 @@ class PreparedPath(object):
             limit = min(limit, math.sqrt(future_speed * future_speed +
                                          2.0 * settings.preview_decel_mps2 * distance))
         return max(0.0, limit), remaining
+
+    def acceleration_reference(self, s, trajectory, settings, reference):
+        """Spatial v^2 slope, bounded by the profile's acceleration limits.
+
+        No SDK clock or trajectory time derivative is assumed. A measured-speed
+        start point uses its first segment; a future constraint is previewed
+        with a corresponding reduction in GPS-relative stopping distance.
+        """
+        distance = min(settings.acceleration_preview_m, self.length - s)
+        if distance <= 1e-6 or reference <= settings.hold_speed_mps:
+            return 0.0
+        if s <= 1e-6:
+            initial = min(self.points[0][2], reference)
+            future = min(self.sample(s + distance)[2], reference)
+        else:
+            initial = reference
+            # The stop distance is relative to the current ego position, so
+            # subtract the virtual preview travel without mutating input.
+            future, _ = self.speed_reference(s + distance, trajectory, settings)
+            if trajectory.stop_required:
+                stop = max(0.0, trajectory.stop_distance - distance -
+                           settings.path_end_margin_m)
+                future = min(future, math.sqrt(2.0 * settings.preview_decel_mps2 * stop))
+        future = min(future, self.curve_speed_limit(s + distance, settings))
+        acceleration = (future * future - initial * initial) / (2.0 * distance)
+        return max(-settings.preview_decel_mps2,
+                   min(settings.launch_accel_mps2, acceleration))

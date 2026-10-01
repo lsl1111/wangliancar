@@ -10,7 +10,8 @@ from unittest.mock import patch
 from core.config import load_config
 from core.interfaces import ControlOut, DecisionMode, DecisionTarget, LaneContext, Trajectory
 from core.serialization import perception_to_dict
-from members.decision_stub import decide
+from members.decision_stub import decide, reset_decision
+from members.decision.settings import DecisionSettings
 from members.control_stub import compute_control, configure_control
 from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
@@ -43,6 +44,8 @@ class StraightLane(object):
 
 class DataChainTests(unittest.TestCase):
     def setUp(self):
+        # These contract tests exercise an explicitly configured low-speed run.
+        reset_decision(DecisionSettings(cruise_speed=2.0))
         self.adapter = EmptyTraffic()
         self.builder = PerceptionBuilder(self.adapter, StraightLane())
         self.builder.update_case_info()
@@ -113,6 +116,9 @@ class DataChainTests(unittest.TestCase):
         self.assertEqual("not_configured", value.source_status["targets"]["quality"])
         self.assertEqual(DecisionMode.KEEP_LANE, decide(value).mode)
         value.scene_id = 1
+        decide(value)
+        value.frame_id += 1
+        value.timestamp += 1
         self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decide(value).mode)
         raw = self.raw()
         raw["targets_frame"] = 5
@@ -171,7 +177,8 @@ class DataChainTests(unittest.TestCase):
         t = plan(p, d)
         self.assertTrue(t.valid, t.errors)
         self.assertEqual(2.0, t.target_speed)
-        self.assertGreater(t.points[0].speed, 0.0)
+        self.assertEqual(0.0, t.points[0].speed)
+        self.assertGreater(t.points[1].speed, 0.0)
         configure_control(SimpleNamespace(control_calibrated=False))
         control = compute_control(p, t)
         self.assertFalse(control.valid)
@@ -192,10 +199,16 @@ class DataChainTests(unittest.TestCase):
         p.scene_id = 4
         self.assertEqual(2.0, decide(p).target_speed)
         p.scene_id = 1
-        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decide(p).mode)
+        decide(p)
+        p.frame_id += 1
+        p.timestamp += 1
+        self.assertEqual(DecisionMode.STOP, decide(p).mode)
         p.target_source = "sensor:perfectPerception1"
         p.source_status["targets"]["usable"] = True
-        decision = decide(p)
+        for unused in range(2):
+            p.frame_id += 1
+            p.timestamp += 1
+            decision = decide(p)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertEqual(2.0, decision.target_speed)
 
@@ -213,7 +226,7 @@ class DataChainTests(unittest.TestCase):
         p.traffic.observed = False
         p.lane.valid = False
         decision = decide(p)
-        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decision.mode)
+        self.assertEqual(DecisionMode.STOP, decision.mode)
         self.assertEqual(0.0, decision.target_speed)
 
     def test_curved_lane_uses_local_direction_and_reverses_boundaries(self):

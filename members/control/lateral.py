@@ -14,7 +14,25 @@ def geometry_request(path, progress, ego, settings):
                                     abs(path_curvature)))
     lookahead_s = min(path.length, progress + distance)
     target_x, target_y, unused_speed = path.sample(lookahead_s)
-    forward, left = world_to_ego(ego.x, ego.y, ego.heading, target_x, target_y)
+    # Predict rear-axle motion during a bounded actuator preview. This uses
+    # measured GPS yaw rate, not a fabricated steering ratio/dynamic model.
+    preview_x, preview_y, preview_heading = ego.x, ego.y, ego.heading
+    yaw_rate = getattr(ego, "yaw_rate", None)
+    preview_time = 0.0
+    if (type(yaw_rate) in (int, float) and math.isfinite(yaw_rate)
+            and ego.speed > 1e-6 and settings.steering_preview_s > 0):
+        preview_time = min(settings.steering_preview_s,
+                           0.35 * (lookahead_s - progress) / ego.speed)
+        angle = yaw_rate * preview_time
+        if abs(angle) < 1e-6:
+            dx, dy = ego.speed * preview_time, 0.0
+        else:
+            radius = ego.speed / yaw_rate
+            dx, dy = radius * math.sin(angle), radius * (1.0 - math.cos(angle))
+        preview_x += dx * math.cos(ego.heading) - dy * math.sin(ego.heading)
+        preview_y += dx * math.sin(ego.heading) + dy * math.cos(ego.heading)
+        preview_heading += angle
+    forward, left = world_to_ego(preview_x, preview_y, preview_heading, target_x, target_y)
     chord2 = forward * forward + left * left
     if forward <= 0.1 or chord2 <= 0.04:
         raise ValueError("no forward lookahead point")
@@ -26,6 +44,8 @@ def geometry_request(path, progress, ego, settings):
         "lookahead_s": lookahead_s, "lookahead_m": distance,
         "path_curvature_m_inv": path_curvature,
         "curvature_m_inv": curvature,
+        "steering_preview_s": preview_time,
+        "preview_ego_x": preview_x, "preview_ego_y": preview_y,
         "lookahead_forward_m": forward, "lookahead_left_m": left}
 
 

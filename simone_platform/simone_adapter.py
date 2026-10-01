@@ -9,6 +9,7 @@ import sys
 import time
 
 from core.interfaces import ControlOut
+from simone_platform.sdk_compat import polling_structs
 
 
 def _decode_sdk_text(value):
@@ -95,6 +96,11 @@ class SimOneAdapter(object):
         self.pnc_api = importlib.import_module("SimOnePNCAPI")
         self.service_api = importlib.import_module("SimOneServiceAPI")
         self.hdmap = importlib.import_module("HDMapAPI")
+        version = self.service_api.SoAPIGetVersion()
+        self.structs, repairs = polling_structs(self.structs, version)
+        if repairs:
+            self.logger.warning("已修正 SDK %s 轮询结构布局: %s",
+                                _decode_sdk_text(version), ", ".join(repairs))
         self.logger.info("SimOne SDK 已加载: %s", sdk_dir)
         return True
 

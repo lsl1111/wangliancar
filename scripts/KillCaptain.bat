@@ -11,3 +11,4 @@ set /p CAPTAIN_PID=<"%PID_FILE%"
 powershell.exe -NoProfile -Command "Stop-Process -Id %CAPTAIN_PID% -ErrorAction SilentlyContinue"
 echo Stop request sent to Captain PID %CAPTAIN_PID%.
 
+exit /b 0

@@ -51,6 +51,26 @@ class ControlTests(unittest.TestCase):
     def advance(self):
         self.now += 0.05
 
+    def test_forward_path_requests_drive_from_neutral_without_rewriting_feedback(self):
+        for speed in (0.0, 3.0):
+            p, t = inputs(speed=speed)
+            p.ego.gear, p.ego.vx = 0, speed
+            result = ControlEngine(calibration(), clock=lambda: self.now).compute(p, t)
+            self.assertTrue(result.valid, result.errors)
+            self.assertEqual(1, result.gear)
+            self.assertEqual(0, p.ego.gear)
+            self.assertEqual(0, result.diagnostics["observed_gear"])
+            self.assertGreater(result.throttle, 0.0)
+
+    def test_reverse_motion_does_not_enable_neutral_or_drive_forward_tracking(self):
+        for gear in (-1, 0, 1, 2, 3, 6):
+            p, t = inputs(speed=1.0)
+            p.ego.gear, p.ego.vx = gear, -1.0
+            result = ControlEngine(calibration(), clock=lambda: self.now).compute(p, t)
+            self.assertFalse(result.valid)
+            self.assertEqual(0.0, result.throttle)
+            self.assertIn("reverse", result.errors[0])
+
     def test_same_trajectory_control_does_not_depend_on_scene_number(self):
         p, t = inputs()
         p.scene_id = 4
@@ -230,7 +250,8 @@ class ControlTests(unittest.TestCase):
         t.target_speed = 8.0
         result = self.engine.compute(p, t)
         self.assertTrue(result.valid, result.errors)
-        self.assertEqual(8.0, result.diagnostics["curve_speed_limit_mps"])
+        self.assertEqual(self.engine.settings.max_track_speed_mps,
+                         result.diagnostics["curve_speed_limit_mps"])
 
     def test_adaptive_lookahead_reduces_circle_tracking_error_in_bicycle_model(self):
         radius = 10.0
@@ -275,19 +296,19 @@ class ControlTests(unittest.TestCase):
     def test_emergency_brakes_in_reverse_without_enabling_reverse_tracking(self):
         p, t = inputs(speed=1.0, points=[(5.0, 0.0, 0.0),
                                          (5.0, 0.0, 0.0)])
-        p.ego.gear = 2
+        p.ego.gear, p.ego.vx = -1, -1.0
         t.emergency_stop, t.stop_required, t.target_speed = True, True, 0.0
         emergency = self.engine.compute(p, t)
         self.assertTrue(emergency.valid, emergency.errors)
-        self.assertEqual(2, emergency.gear)
+        self.assertEqual(0, emergency.gear)
         self.assertEqual((0.0, 0.9, 0.0),
                          (emergency.throttle, emergency.brake, emergency.steering))
         self.advance()
         p, t = inputs(frame=2)
-        p.ego.gear = 2
+        p.ego.gear, p.ego.vx = -1, -1.0
         ordinary = self.engine.compute(p, t)
         self.assertFalse(ordinary.valid)
-        self.assertIn("only forward Drive gear", ordinary.errors[0])
+        self.assertIn("reverse or invalid velocity", ordinary.errors[0])
 
     def test_stationary_stop_brakes_then_holds_without_forward_geometry(self):
         stationary_points = [(5.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
@@ -460,7 +481,7 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(self.engine.compute(p, t).valid)
         self.advance()
         p, t = inputs(frame=2)
-        p.ego.gear = 2
+        p.ego.gear, p.ego.vx = -1, -1.0
         self.assertFalse(self.engine.compute(p, t).valid)
         self.advance()
         p, t = inputs(frame=3)
