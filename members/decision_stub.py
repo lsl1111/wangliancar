@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-obstacle-guard-v3"
+DECISION_VERSION = "decision-constraints-v4"
 _ENGINE = DecisionEngine()
 
 

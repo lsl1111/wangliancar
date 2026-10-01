@@ -27,7 +27,7 @@ class ObstaclePipelineTests(unittest.TestCase):
 
     def test_distant_stopped_lead_allows_launch_with_a_stop_boundary(self):
         decision, trajectory, control = self.run_case(0.0, 0.0)
-        self.assertEqual("FOLLOW", decision.mode)
+        self.assertEqual("KEEP_LANE", decision.mode)
         self.assertGreater(decision.target_speed, 0.0)
         self.assertTrue(trajectory.valid, trajectory.reason)
         self.assertTrue(trajectory.stop_required)

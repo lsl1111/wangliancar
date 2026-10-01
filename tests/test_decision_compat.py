@@ -37,8 +37,9 @@ def lead(p, speed=6.0):
     target.id = 1
     target.lane_id = p.lane.lane_id
     target.same_lane_valid = target.same_lane = True
-    target.longitudinal_distance = target.x = 100.0
+    target.longitudinal_distance = target.x = 80.0
     target.length = 4.0
+    target.width = 1.8
     target.vx = speed
     p.targets = [target]
     return p
@@ -46,7 +47,8 @@ def lead(p, speed=6.0):
 
 class DecisionCompatibilityTests(unittest.TestCase):
     def setUp(self):
-        self.engine = DecisionEngine(DecisionSettings(cruise_speed=3.0))
+        self.engine = DecisionEngine(DecisionSettings(cruise_speed=3.0,
+                                                        front_offset_m=3.5))
 
     def test_raw_gps_gear_is_not_command_enum(self):
         for raw in (-1, 2, 4):
@@ -71,13 +73,16 @@ class DecisionCompatibilityTests(unittest.TestCase):
         p = sample(scene=6, targets_usable=False)
         p.ego.valid = False
         self.assertEqual(DecisionMode.EMERGENCY_BRAKE, self.engine.run(p).mode)
-        p = sample(11, scene=6, targets_usable=False)
-        self.assertEqual(DecisionMode.KEEP_LANE, self.engine.run(p).mode)
+        for frame in (11, 12):
+            self.assertEqual(DecisionMode.STOP, self.engine.run(
+                sample(frame, scene=6, targets_usable=False)).mode)
+        self.assertEqual(DecisionMode.KEEP_LANE, self.engine.run(
+            sample(13, scene=6, targets_usable=False)).mode)
 
     def test_repeated_gps_frame_does_not_count_multiple_target_faults(self):
         p = sample(targets_usable=False)
         for _ in range(5):
-            self.assertEqual(DecisionMode.KEEP_LANE, self.engine.run(p).mode)
+            self.assertEqual(DecisionMode.STOP, self.engine.run(p).mode)
         self.assertEqual(1, self.engine._blind_fault_count)
         p = sample(11, targets_usable=False)
         self.assertEqual(DecisionMode.STOP, self.engine.run(p).mode)
@@ -87,8 +92,9 @@ class DecisionCompatibilityTests(unittest.TestCase):
         self.engine.run(sample(10, targets_usable=False))
         self.engine.run(sample(11))
         result = self.engine.run(sample(12, targets_usable=False))
-        self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
+        self.assertEqual(DecisionMode.STOP, result.mode)
         self.assertEqual(1, self.engine._blind_fault_count)
+        self.assertFalse(self.engine._blind_stop)
 
     def test_unusable_target_list_is_not_used_for_following(self):
         for source in ("none", "ground_truth", "sensor:front"):
@@ -110,7 +116,10 @@ class DecisionCompatibilityTests(unittest.TestCase):
         self.engine.run(sample(11, speed=3.0, targets_usable=False))
         moving = self.engine.run(lead(sample(12, speed=3.0)))
         self.assertEqual(DecisionMode.EMERGENCY_BRAKE, moving.mode)
-        recovered = self.engine.run(lead(sample(13, speed=0.0)))
+        for frame in (13, 14):
+            held = self.engine.run(lead(sample(frame, speed=0.0)))
+            self.assertEqual(DecisionMode.STOP, held.mode)
+        recovered = self.engine.run(lead(sample(15, speed=0.0)))
         self.assertEqual(DecisionMode.FOLLOW, recovered.mode)
         self.assertFalse(self.engine._blind_stop)
 
