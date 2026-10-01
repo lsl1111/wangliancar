@@ -19,12 +19,15 @@ class RuntimeLaunchTests(unittest.TestCase):
         fixture = (
             "import json, os, sys\n"
             "print(json.dumps({'speed': os.environ.get('NEVC_DECISION_CRUISE_SPEED'), "
+            "'front': os.environ.get('NEVC_VEHICLE_FRONT_OFFSET_M'), "
+            "'half_width': os.environ.get('NEVC_VEHICLE_HALF_WIDTH_M'), "
             "'args': sys.argv[1:]}))\n"
             "sys.exit(7 if '--fixture-fail' in sys.argv else 0)\n"
         )
         # Exercise the actual batch in an isolated project, without SDK calls.
-        cases = ((None, False, 0), ("4.5", True, 7))
-        for supplied_speed, local_config, expected_exit in cases:
+        cases = ((None, False, 0, {}), ("4.5", True, 7, {
+            "NEVC_VEHICLE_FRONT_OFFSET_M": "4.1", "NEVC_VEHICLE_HALF_WIDTH_M": "1.0"}))
+        for supplied_speed, local_config, expected_exit, geometry in cases:
             with self.subTest(speed=supplied_speed, local=local_config), \
                     tempfile.TemporaryDirectory(prefix="nevc launch ") as directory:
                 scripts = os.path.join(directory, "scripts")
@@ -39,6 +42,9 @@ class RuntimeLaunchTests(unittest.TestCase):
                         stream.write("[app]\n")
                 environment = os.environ.copy()
                 environment.pop("NEVC_DECISION_CRUISE_SPEED", None)
+                environment.pop("NEVC_VEHICLE_FRONT_OFFSET_M", None)
+                environment.pop("NEVC_VEHICLE_HALF_WIDTH_M", None)
+                environment.update(geometry)
                 if supplied_speed is not None:
                     environment["NEVC_DECISION_CRUISE_SPEED"] = supplied_speed
                 argument = "--fixture-fail" if expected_exit else "--fixture"
@@ -54,6 +60,10 @@ class RuntimeLaunchTests(unittest.TestCase):
                 with open(os.path.join(runtime_dir, console_logs[0]), encoding="utf-8") as stream:
                     launched = json.loads(stream.read())
                 self.assertEqual(supplied_speed or "8.333333333333334", launched["speed"])
+                self.assertEqual(geometry.get("NEVC_VEHICLE_FRONT_OFFSET_M", "3.9187"),
+                                 launched["front"])
+                self.assertEqual(geometry.get("NEVC_VEHICLE_HALF_WIDTH_M", "0.9"),
+                                 launched["half_width"])
                 self.assertEqual(argument, launched["args"][-1])
                 if local_config:
                     self.assertEqual("--config", launched["args"][0])
@@ -64,6 +74,8 @@ class RuntimeLaunchTests(unittest.TestCase):
                 with open(os.path.join(runtime_dir, "launcher.log")) as stream:
                     launch_log = stream.read()
                 self.assertIn("Decision cruise speed: " + (supplied_speed or "8.333333333333334"), launch_log)
+                self.assertIn("Vehicle geometry: front=" + launched["front"] +
+                              " m half-width=" + launched["half_width"] + " m", launch_log)
                 self.assertIn("exited with code " + str(expected_exit), launch_log)
 
     def test_snapshot_io_failure_keeps_previous_data_and_recovers(self):
