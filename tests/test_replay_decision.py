@@ -21,7 +21,8 @@ from members.decision.settings import DecisionSettings  # noqa: E402
 from scripts import replay_decision  # noqa: E402
 
 
-def snapshot(frame=42, x=10.0, targets=None, lane_valid=True, targets_valid=True):
+def snapshot(frame=42, x=10.0, targets=None, lane_valid=True, targets_valid=True,
+             scene_id=6):
     """A captain-shaped snapshot dict, as perception_to_dict would emit.
 
     `valid_until` is a process-local monotonic deadline, so a saved snapshot is
@@ -29,7 +30,7 @@ def snapshot(frame=42, x=10.0, targets=None, lane_valid=True, targets_valid=True
     """
     return {
         "frame_id": frame, "timestamp": 9000, "valid_until": 0.0,
-        "valid": True, "errors": [], "scene_id": 6, "case_name": "06.test",
+        "valid": True, "errors": [], "scene_id": scene_id, "case_name": "snapshot.test",
         "ego": {"frame_id": frame, "timestamp": 9000, "x": x, "y": 0.0, "z": 0.0,
                 "heading": 0.0, "vx": 6.0, "vy": 0.0, "speed": 6.0, "gear": 1,
                 "age_ms": 0, "valid": True, "wheel_speeds": [1.0, 1.0],
@@ -41,7 +42,9 @@ def snapshot(frame=42, x=10.0, targets=None, lane_valid=True, targets_valid=True
                     "stop_line_distance": -1.0, "speed_limit": -1.0},
         "targets": targets if targets is not None else [],
         "targets_valid": targets_valid,
-        "source_status": {"targets": {"read_ok": targets_valid,
+        "target_source": "sensor:test",
+        "source_status": {"gps": {"read_ok": True, "usable": True},
+                          "targets": {"read_ok": targets_valid,
                                       "usable": targets_valid,
                                       "quality": "ok" if targets_valid else "unavailable",
                                       "age_ms": 0}},
@@ -109,7 +112,7 @@ class ReplayTests(unittest.TestCase):
         # braking. Latching only happens if one engine sees both frames in
         # order: a per-frame engine would report KEEP_LANE twice.
         paths = [self.write("blind_{0}.json".format(i),
-                            snapshot(frame=i + 1, targets_valid=False))
+                            snapshot(frame=i + 1, targets_valid=False, scene_id=14))
                  for i in range(2)]
         report = replay_decision.replay(paths, DecisionSettings(), revive_ttl=5.0)
         self.assertEqual(1, report["modes"]["KEEP_LANE"])

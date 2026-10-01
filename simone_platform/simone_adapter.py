@@ -9,6 +9,7 @@ import sys
 import time
 
 from core.interfaces import ControlOut
+from simone_platform.sdk_compat import polling_structs
 
 
 def _decode_sdk_text(value):
@@ -95,6 +96,11 @@ class SimOneAdapter(object):
         self.pnc_api = importlib.import_module("SimOnePNCAPI")
         self.service_api = importlib.import_module("SimOneServiceAPI")
         self.hdmap = importlib.import_module("HDMapAPI")
+        version = self.service_api.SoAPIGetVersion()
+        self.structs, repairs = polling_structs(self.structs, version)
+        if repairs:
+            self.logger.warning("已修正 SDK %s 轮询结构布局: %s",
+                                _decode_sdk_text(version), ", ".join(repairs))
         self.logger.info("SimOne SDK 已加载: %s", sdk_dir)
         return True
 
@@ -198,12 +204,31 @@ class SimOneAdapter(object):
             gps_data[name] = float(getattr(gps, sdk_name, 0.0))
         self._metadata("gps", gps, True)
         errors = []
+        reference = self._read_reference_data()
+        configurations = reference["sensor_configurations"]
+        preferred_id = self.config.sensor_id
+        if reference["sensor_configurations_valid"]:
+            ids = [item.get("id", "") for item in configurations if isinstance(item, dict)]
+            if preferred_id in ids:
+                target_sensor_id = preferred_id
+            else:
+                candidates = [item.get("id", "") for item in configurations
+                              if isinstance(item, dict) and item.get("id") and
+                              any(word in item.get("type", "").lower() for word in
+                                  ("camera", "lidar", "fusion", "perfect"))]
+                target_sensor_id = candidates[0] if candidates else ""
+            sensor_presence = "configured" if target_sensor_id else "not_configured"
+        else:
+            target_sensor_id = preferred_id
+            sensor_presence = "unknown"
         target_frame, target_timestamp = -1, 0
-        try:
-            targets, source, target_frame, target_timestamp = self._read_sensor_targets()
-        except Exception as exc:
-            errors.append("SENSOR_TARGETS_INVALID:{0}".format(type(exc).__name__))
-            targets = None
+        targets, source = None, "none"
+        if target_sensor_id:
+            try:
+                targets, source, target_frame, target_timestamp = self._read_sensor_targets(
+                    target_sensor_id)
+            except Exception as exc:
+                errors.append("SENSOR_TARGETS_INVALID:{0}".format(type(exc).__name__))
         if targets is None:
             try:
                 targets, target_frame, target_timestamp = self._read_ground_truth_targets()
@@ -218,10 +243,13 @@ class SimOneAdapter(object):
                   "targets_age_ms": self._frame_age_ms("targets:" + source, target_frame)
                   if targets is not None else -1,
                   "errors": errors}
-        result.update(self._read_reference_data())
+        result.update(reference)
         result.update(self._read_auxiliary_data(result["sensor_configurations"]))
         self._source_status["targets"] = {
             "read_ok": targets is not None, "source": source,
+            "sensor_presence": sensor_presence,
+            "sensor_id": target_sensor_id,
+            "sensor_read_ok": source.startswith("sensor:"),
             "frame_id": result["targets_frame"], "timestamp": result["targets_timestamp"],
             "age_ms": result["targets_age_ms"], "clock": "sdk_frame"}
         return result
@@ -246,10 +274,10 @@ class SimOneAdapter(object):
             "age_ms": self._frame_age_ms(source, frame) if ok else -1,
             "clock": "sdk_frame" if frame >= 0 else "unavailable"}
 
-    def _read_sensor_targets(self):
+    def _read_sensor_targets(self, sensor_id):
         data = self.structs.SimOne_Data_SensorDetections()
         ok = self.sensor_api.SoGetSensorDetections(
-            self.config.vehicle_id, self.config.sensor_id, data
+            self.config.vehicle_id, sensor_id, data
         )
         if not ok:
             return None, "none", -1, 0
@@ -259,7 +287,7 @@ class SimOneAdapter(object):
         for index in range(int(data.objectSize)):
             item = data.objects[index]
             targets.append(self._target_dict(item, float(item.probability)))
-        return targets, "sensor:{0}".format(self.config.sensor_id), int(data.frame), int(data.timestamp)
+        return targets, "sensor:{0}".format(sensor_id), int(data.frame), int(data.timestamp)
 
     def _read_ground_truth_targets(self):
         data = self.structs.SimOne_Data_Obstacle()

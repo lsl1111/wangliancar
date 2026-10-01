@@ -11,6 +11,11 @@ import time
 
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+
+from core.scene_requirements import requires_targets
+
 DEFAULT_SNAPSHOT = os.path.join(PROJECT_DIR, "runtime_data", "latest_perception.json")
 DEFAULT_OUTPUT = os.path.join(PROJECT_DIR, "runtime_data", "scene_acceptance")
 
@@ -67,6 +72,7 @@ def analyze_frames(frames, scene_id, minimum=20):
     if scene_id not in SCENES:
         raise ValueError("scene_id must be 1..41")
     name, capability = SCENES[scene_id]
+    target_required = requires_targets(scene_id)
     failures, warnings = [], []
     counts = {"gps_ok": 0, "targets_ok": 0, "lane_ok": 0,
               "sensor_config_ok": 0, "target_frames_with_objects": 0,
@@ -141,12 +147,12 @@ def analyze_frames(frames, scene_id, minimum=20):
         failures.append("only {0}/{1} distinct frames captured".format(total, minimum))
     if counts["gps_ok"] != total:
         failures.append("GPS usable in {0}/{1} frames".format(counts["gps_ok"], total))
-    if counts["targets_ok"] != total:
+    if target_required and counts["targets_ok"] != total:
         failures.append("configured sensor targets usable in {0}/{1} frames".format(
             counts["targets_ok"], total))
     if counts["lane_ok"] != total:
         failures.append("HD-map lane usable in {0}/{1} frames".format(counts["lane_ok"], total))
-    if total and counts["sensor_config_ok"] == 0:
+    if target_required and total and counts["sensor_config_ok"] == 0:
         failures.append("target sensor ID was not confirmed in sensor configurations")
     if len(seen_cases) > 1:
         failures.append("case identity changed during capture")
@@ -162,10 +168,12 @@ def analyze_frames(frames, scene_id, minimum=20):
         warnings.append("no applicable signal/stop-line pair observed")
     if capability == "continuous" and counts["route_frames"] == 0:
         warnings.append("task waypoints not observed")
-    if capability in ("targets", "lane_change", "intersection", "vulnerable") and not counts["target_frames_with_objects"]:
+    if target_required and not counts["target_frames_with_objects"]:
         warnings.append("no dynamic target event observed")
     if "ground_truth" in seen_sources:
         warnings.append("ground-truth fallback observed; sensor-range compliance unverified")
+    if total and not target_required and counts["targets_ok"] != total:
+        warnings.append("target sensor optional for this scene; unavailable frames do not block acceptance")
     result_status = ("NO_DATA" if not total else
                      "STRUCTURAL_PASS" if total >= minimum and not failures else
                      "FAIL_OR_INCOMPLETE")

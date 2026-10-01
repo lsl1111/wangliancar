@@ -6,6 +6,7 @@ import time
 
 from core.geometry import calculate_ttc, speed_2d, world_to_ego, project_polyline
 from core.interfaces import EgoState, Perception, Target, TrafficControl
+from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
 
 
@@ -191,7 +192,9 @@ class PerceptionBuilder(object):
                 age, frame = int(meta.get("age_ms", -1)), int(meta.get("frame_id", -1))
                 quality = "ok"
                 if not meta.get("read_ok", False):
-                    quality = "unavailable"
+                    quality = ("not_configured" if source == "targets" and
+                               meta.get("sensor_presence") == "not_configured"
+                               else "unavailable")
                 elif meta.get("data_invalid", False):
                     quality = "invalid"
                 elif age == -2:
@@ -207,7 +210,9 @@ class PerceptionBuilder(object):
             except (ValueError, TypeError, OverflowError):
                 meta["quality"], meta["usable"] = "invalid", False
             if not meta["usable"]:
-                result.sensor_errors.append(source + ":" + meta["quality"])
+                if not (source == "targets" and meta["quality"] == "not_configured"
+                        and not requires_targets(result.scene_id)):
+                    result.sensor_errors.append(source + ":" + meta["quality"])
                 if source == "targets":
                     result.targets_valid = False
                 elif source.startswith("radar:"):
@@ -220,7 +225,7 @@ class PerceptionBuilder(object):
                     # This SDK's IMU struct has no frame header. Keep readable
                     # measurements, but do not claim synchronized usability.
                     result.imu_valid = False
-        if not result.targets_valid:
+        if not result.targets_valid and requires_targets(result.scene_id):
             result.errors.append("TARGETS_UNAVAILABLE")
         result.traffic = self._build_traffic(result.ego, result.lane, result.errors)
         if result.traffic.observed:

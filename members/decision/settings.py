@@ -54,7 +54,7 @@ def overrides_from_environment(environ=None):
 
 
 class DecisionSettings(object):
-    def __init__(self, cruise_speed=8.0, min_gap=4.0, time_headway=1.2,
+    def __init__(self, cruise_speed=30.0 / 3.6, min_gap=4.0, time_headway=1.2,
                  resume_margin=2.0, emergency_clearance=2.0, emergency_ttc=2.0,
                  launch_ttc_cap=6.0, stop_margin=3.0,
                  obstacle_stop_margin=3.0, traffic_stop_margin=3.0,

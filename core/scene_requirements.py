@@ -1,0 +1,16 @@
+"""Minimum data channels needed by each known NEVC scene.
+
+Unknown cases stay conservative. Optional observations may still inform safety
+when they are fresh, but their absence is not a scene failure.
+"""
+
+TARGET_SCENES = frozenset(
+    (1, 2, 3) + tuple(range(11, 19)) + tuple(range(21, 29))
+    + tuple(range(30, 42))
+)
+
+
+def requires_targets(scene_id):
+    if type(scene_id) is not int or not 1 <= scene_id <= 41:
+        return True
+    return scene_id in TARGET_SCENES

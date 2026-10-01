@@ -20,6 +20,19 @@ class AppConfig(object):
         self.connect_timeout_sec = max(1.0, float(values.get("connect_timeout_sec", "30")))
         self.scene_id_override = int(values.get("scene_id_override", "0"))
         self.send_control = _as_bool(values.get("send_control", "false"))
+        self.control_calibrated = _as_bool(values.get("control_calibrated", "false"))
+        for name in ("wheelbase_m", "front_steer_max_rad", "throttle_per_mps",
+                     "brake_per_mps", "hold_brake", "emergency_brake",
+                     "max_throttle", "max_brake"):
+            setattr(self, "control_" + name,
+                    _optional_float(values.get("control_" + name, "")))
+        sign = values.get("control_steering_sign", "").strip()
+        self.control_steering_sign = int(sign) if sign else None
+        # Normal sending and brake-only overrides both require this safety exit.
+        self.safety_brake_enabled = _as_bool(values.get("safety_brake_enabled", "false"))
+        self.safety_controlled_brake = float(values.get("safety_controlled_brake", "0.3"))
+        self.safety_emergency_brake = float(values.get("safety_emergency_brake", "1.0"))
+        self.safety_recovery_frames = max(1, int(values.get("safety_recovery_frames", "3")))
         self.publish_json = _as_bool(values.get("publish_json", "true"))
         self.log_level = values.get("log_level", "INFO").upper()
         self.runtime_dir = os.path.join(project_dir, "runtime_data")
@@ -27,6 +40,11 @@ class AppConfig(object):
 
 def _as_bool(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _optional_float(value):
+    text = str(value).strip()
+    return float(text) if text else None
 
 
 def load_config(project_dir, custom_path=None):

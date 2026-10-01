@@ -16,7 +16,7 @@ from core.serialization import to_dict
 from core.validation import current, validate_output
 from members.decision.engine import DecisionEngine
 from members.decision.settings import DecisionSettings
-from members.decision_stub import decide
+from members.decision_stub import decide, reset_decision
 
 FRAME_ID = 7
 TIMESTAMP = 4242
@@ -57,6 +57,7 @@ def perception(speed=0.0, targets_valid=True, frame_id=FRAME_ID, ttl=10.0):
     p.lane.lane_width = 3.5
     p.lane.lane_width_valid = True
     p.targets_valid = targets_valid
+    p.target_source = "sensor:test"
     p.targets = []
     p.traffic.speed_limit = -1.0
     p.source_status = {
@@ -105,6 +106,7 @@ def add_red_light(p, stop_line_distance, ambiguous=False):
 
 class DecisionTests(unittest.TestCase):
     def setUp(self):
+        reset_decision()
         self.engine = DecisionEngine()
 
     def run_engine(self, value, settings=None, require_current=True):
@@ -355,30 +357,30 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(DecisionMode.KEEP_LANE, self.run_engine(p).mode)
 
     def test_repeated_target_failure_latches_a_blind_stop(self):
-        for _ in range(2):
-            p = perception(speed=0.0, targets_valid=False)
+        for frame in range(2):
+            p = perception(speed=0.0, targets_valid=False, frame_id=frame)
             result = self.run_engine(p)
         self.assertEqual(DecisionMode.STOP, result.mode)
         self.assertEqual(0.0, result.target_speed)
         self.assertIn("blind stop", result.reason)
 
     def test_blind_stop_is_not_released_while_still_moving(self):
-        for _ in range(2):
-            self.run_engine(perception(speed=4.0, targets_valid=False))
-        still_moving = self.run_engine(perception(speed=2.0))
-        self.assertEqual(DecisionMode.STOP, still_moving.mode)
+        for frame in range(2):
+            self.run_engine(perception(speed=4.0, targets_valid=False, frame_id=frame))
+        still_moving = self.run_engine(perception(speed=2.0, frame_id=2))
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, still_moving.mode)
 
     def test_blind_stop_releases_after_standstill_and_repeated_good_evidence(self):
-        for _ in range(2):
-            self.run_engine(perception(speed=4.0, targets_valid=False))
-        self.run_engine(perception(speed=0.0))
-        released = self.run_engine(perception(speed=0.0))
+        for frame in range(2):
+            self.run_engine(perception(speed=4.0, targets_valid=False, frame_id=frame))
+        self.run_engine(perception(speed=0.0, frame_id=2))
+        released = self.run_engine(perception(speed=0.0, frame_id=3))
         self.assertEqual(DecisionMode.KEEP_LANE, released.mode)
 
     def test_empty_target_list_is_not_read_as_a_clear_road(self):
-        first = perception(speed=0.0, targets_valid=False)
+        first = perception(speed=0.0, targets_valid=False, frame_id=1)
         self.run_engine(first)
-        second = perception(speed=0.0, targets_valid=False)
+        second = perception(speed=0.0, targets_valid=False, frame_id=2)
         result = self.run_engine(second)
         self.assertEqual(DecisionMode.STOP, result.mode)
 

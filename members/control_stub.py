@@ -1,17 +1,17 @@
-"""Control member integration point.
+"""Fixed team entry for the forward-only controller."""
 
-The captain project intentionally returns invalid control so observe mode can never
-move the vehicle by accident. The control member replaces compute_control().
-"""
+from members.control.controller import ControlEngine
+from members.control.parameters import VehicleCalibration
 
-from core.interfaces import ControlOut
+
+_engine = ControlEngine()
+
+
+def configure_control(config):
+    """Captain injects vehicle-specific calibration; never read SDK or INI here."""
+    global _engine
+    _engine = ControlEngine(VehicleCalibration.from_app_config(config))
 
 
 def compute_control(perception, trajectory):
-    output = ControlOut().bind(trajectory)
-    output.source = "captain_placeholder_no_actuation"
-    output.valid = False
-    output.errors.append("CONTROL_NOT_IMPLEMENTED")
-    if trajectory.emergency_stop:
-        output.errors.append("EMERGENCY_STOP_UNACTUATED")
-    return output
+    return _engine.compute(perception, trajectory)

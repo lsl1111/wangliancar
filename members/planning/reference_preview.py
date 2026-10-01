@@ -38,7 +38,9 @@ def build_preview(perception, decision):
             raise ValueError("map lane unavailable")
         if decision.target_lane_id and decision.target_lane_id != perception.lane.lane_id:
             raise ValueError("target lane geometry unavailable; lane change unsupported")
-        if perception.ego.gear == 2:
+        ego = perception.ego
+        if (not all(math.isfinite(v) for v in (ego.vx, ego.vy, ego.heading)) or
+                ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -1e-6):
             raise ValueError("reverse trajectory unsupported")
         points = []
         for point in perception.lane.center_line:

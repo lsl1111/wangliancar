@@ -8,14 +8,15 @@ Design rules, in priority order:
 1. Unknown is not safe. A source the captain marked unusable is treated as
    absent evidence, not as an empty road.
 2. Fail safe, not silent. Every degraded decision says why in `reason`.
-3. Latched safety. A blind-stop or following state is not released by a
-   single frame of good news.
+3. Latched safety. A blind-stop is released only after required evidence
+   returns and the vehicle is slow enough to resume.
 4. No silent behaviour invention. Situations this member cannot resolve
    (unverified lane membership, ambiguous signal groups, shared-lane
    obstacles that would need steering) become a documented stop.
 """
 
 from core.interfaces import DecisionMode, DecisionTarget
+from core.scene_requirements import requires_targets
 
 from members.decision import candidates as candidate_rules
 from members.decision import protocol, speed_policy
@@ -52,8 +53,33 @@ class DecisionEngine(object):
         # change and no edit to the captain's shared config file.
         self.settings = settings if settings is not None else DecisionSettings.from_environment()
         self.settings.validate()
+        self.reset()
+
+    def reset(self):
+        """Discard state belonging to an earlier simulation run."""
         self._blind_fault_count = 0
         self._blind_stop = False
+        self._context = None
+        self._last_frame = None
+
+    def _observe_frame(self, perception):
+        """Count source frames once and reset state when a new run is seen."""
+        context = (getattr(perception, "case_id", ""),
+                   getattr(perception, "task_id", ""),
+                   getattr(perception, "scene_id", 0))
+        frame = (getattr(perception, "frame_id", -1),
+                 getattr(perception, "timestamp", 0))
+        frame_id = frame[0]
+        rolled_back = (self._last_frame is not None
+                       and type(frame_id) is int and frame_id >= 0
+                       and type(self._last_frame[0]) is int
+                       and frame_id < self._last_frame[0])
+        if context != self._context or rolled_back:
+            self.reset()
+            self._context = context
+        distinct = frame != self._last_frame
+        self._last_frame = frame
+        return distinct
 
     # -- public entry ----------------------------------------------------
 
@@ -61,7 +87,7 @@ class DecisionEngine(object):
         output = DecisionTarget()
         try:
             _link_frame(perception, output)
-            self._arbitrate(perception, output)
+            self._arbitrate(perception, output, self._observe_frame(perception))
         except Exception as exc:  # never leave a half-filled decision
             output.valid = False
             output.mode = DecisionMode.STOP
@@ -73,10 +99,11 @@ class DecisionEngine(object):
 
     # -- arbitration -----------------------------------------------------
 
-    def _arbitrate(self, perception, output):
+    def _arbitrate(self, perception, output, distinct_frame):
         settings = self.settings
         if not protocol.perception_usable(perception):
-            self._blind_fault_count += 1
+            if distinct_frame:
+                self._blind_fault_count += 1
             self._blind_stop = True
             self._stop(output, "ego frame unavailable, invalid or expired", None, True)
             return
@@ -85,11 +112,35 @@ class DecisionEngine(object):
         ego_speed = float(ego.speed)
         cruising = speed_policy.desired_speed(perception, settings)
 
-        # Traffic control outranks obstacles: a signal applies to the whole
-        # lane, while obstacle handling below can only stop earlier.
+        # Optional sensors do not block a lane-only scene. In all scenes stale
+        # lists and Ground Truth remain diagnostic data, never lead evidence.
+        targets_fresh = protocol.targets_usable(perception)
+        targets_required = requires_targets(perception.scene_id)
+        if targets_required and not targets_fresh:
+            if distinct_frame:
+                self._blind_fault_count += 1
+            if self._blind_fault_count >= 2:
+                self._blind_stop = True
+        else:
+            self._blind_fault_count = 0
+
+        # A valid lead must not bypass recovery from an earlier blind stop.
+        # Once latched, first regain required data and slow down, then resume.
+        if self._blind_stop:
+            if targets_required and not targets_fresh:
+                self._stop(output, "target observations unusable; blind stop latched "
+                                   "until standstill", None, self._braking_required(ego_speed))
+                return
+            if ego_speed > settings.blind_speed_tolerance:
+                self._stop(output, "recovering from blind stop; still moving",
+                           None, True)
+                return
+            self._blind_stop = False
+
+        # Signal-first arbitration is retained from the delivered algorithm.
+        # Joint arbitration with closer targets remains pending (INTEGRATION.md).
         traffic = perception.traffic
         if protocol.traffic_requires_stop(traffic):
-            self._blind_fault_count = 0
             distance = protocol.traffic_stop_distance(traffic, settings.traffic_stop_margin)
             if traffic.ambiguous:
                 reason = "signal group unresolved; stop until the applicable lamp is known"
@@ -105,39 +156,24 @@ class DecisionEngine(object):
             return
 
         if not protocol.lane_usable(perception):
-            self._blind_fault_count = 0
             if ego_speed > settings.blind_speed_tolerance:
                 self._stop(output, "lane unavailable; no steerable reference", None, True)
             else:
                 self._stop(output, "lane unavailable; holding at standstill")
             return
 
-        # The vehicle keeps rolling unless the captain's per-source gate says
-        # the observations behind a stop decision are trustworthy. Losing the
-        # target stream is a loss of evidence, not a clear road.
-        if not protocol.targets_usable(perception):
-            self._blind_fault_count += 1
-            if self._blind_fault_count >= 2:
-                self._blind_stop = True
-            if self._blind_stop:
-                self._stop(output, "target observations unusable; blind stop latched "
-                                   "until standstill", None, self._braking_required(ego_speed))
-                return
-
         built = []
-        for target in perception.targets:
+        for target in perception.targets if targets_fresh else []:
             candidate = candidate_rules.build_candidate(target, ego, perception)
             if candidate is not None:
                 built.append(candidate)
         lead = candidate_rules.select_lead(built)
 
         if speed_policy.is_emergency(lead, ego_speed, settings):
-            self._blind_fault_count = 0
             self._stop(output, "obstacle emergency envelope", 0.0, True)
             return
 
         if lead is not None:
-            self._blind_fault_count = 0
             if lead.clearance is None:
                 # The gap behind this target cannot be measured, so neither
                 # following nor a safe approach speed can be justified. Stop
@@ -146,27 +182,19 @@ class DecisionEngine(object):
                                    "gap unmeasurable, stopping at the minimum gap",
                            speed_policy.obstacle_stop_distance(lead, settings))
                 return
-            # A map-verified lead always yields a following demand. There is
-            # no "too far to follow" state: the speed policy already returns
-            # cruise speed when the time gap is wide open.
-            self._follow(output, speed_policy.follow_speed(lead, ego, settings), lead, ego_speed)
+            # Keep the delivered following policy, while enforcing the same
+            # cruise and published speed ceilings as clear-road driving.
+            self._follow(output, min(cruising, speed_policy.follow_speed(lead, ego, settings)),
+                         lead, ego_speed)
             return
 
         unverified = candidate_rules.unverified_close_targets(built, settings)
         if unverified:
-            self._blind_fault_count = 0
             nearest = min(unverified, key=lambda item: item.clearance)
             self._stop(output, "obstacle {0:.1f}m away is not map-verified as in-lane; "
                                "lane membership unknown, stopping instead of guessing"
                        .format(nearest.clearance))
             return
-
-        if self._blind_stop:
-            if ego_speed > settings.blind_speed_tolerance:
-                self._stop(output, "recovering from blind stop; still moving")
-                return
-            self._blind_stop = False
-            self._blind_fault_count = 0
 
         self._cruise(output, cruising, perception)
 

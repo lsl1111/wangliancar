@@ -55,6 +55,8 @@ class EgoState(object):
         self.steering = 0.0
         self.wheel_speeds = []
         self.odometer = -1.0
+        # Raw GPS gearbox position (int), not the control N/D/R/P enum.
+        # Keep it unchanged; do not copy it into ControlOut.gear.
         self.gear = 0
         self.valid = False
         # Local age since this GPS frame was first received, or -1 if unknown.
@@ -128,6 +130,16 @@ class LaneContext(object):
         self.speed_limit_source = "unavailable"
         self.predecessor_lane_ids = []
         self.successor_lane_ids = []
+        # HD-map reference in the travel direction, including verified unique
+        # successors. center_line/boundaries still describe only lane_id.
+        # The full current center_line is the unchanged prefix. Coordinates
+        # are world metres; IDs are plain strings, never SDK objects.
+        self.forward_reference = []
+        self.forward_lane_ids = []
+        self.forward_reference_valid = False
+        # map_end: confirmed terminal; lookahead_limit: more links exist.
+        # Other values describe why expansion stopped at a known boundary.
+        self.forward_reference_status = "unavailable"
         self.source = "none"
         self.heading_error = 0.0
         self.lateral_offset = 0.0
@@ -239,6 +251,7 @@ class ControlOut(FrameOutput):
         self.throttle = 0.0
         self.brake = 0.0
         self.steering = 0.0
+        # Command enum: Neutral=0, Drive=1, Reverse=2, Parking=3.
         self.gear = 1
         self.handbrake = False
         self.left_signal = False
@@ -246,6 +259,7 @@ class ControlOut(FrameOutput):
         self.hazard_signal = False
         self.valid = False
         self.source = ""
+        self.diagnostics = {}
 
     def clamp(self):
         values = (self.throttle, self.brake, self.steering)

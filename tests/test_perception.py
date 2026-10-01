@@ -154,7 +154,10 @@ class PerceptionTests(unittest.TestCase):
                "environment_valid": True}
         value = self.builder.build_from_raw(raw)
         self.assertFalse(value.targets_valid)
-        self.assertIn("TARGETS_UNAVAILABLE", value.errors)
+        self.assertNotIn("TARGETS_UNAVAILABLE", value.errors)
+        self.builder.scene_id = 1
+        self.assertIn("TARGETS_UNAVAILABLE", self.builder.build_from_raw(raw).errors)
+        self.builder.scene_id = 6
         self.assertEqual(-3.0, value.ego.acceleration)
         snapshot = perception_to_dict(value)
         self.assertEqual([[1.0, 2.0]], [list(p) for p in snapshot["route_points"]])

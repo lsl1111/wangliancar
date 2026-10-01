@@ -10,6 +10,7 @@ import math
 from core.geometry import normalize_angle, project_polyline
 from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory, TrajectoryPoint
 from core.validation import current, number, validate_output
+from core.scene_requirements import requires_targets
 
 
 EPS = 1e-6
@@ -57,20 +58,35 @@ def _clean_reference(raw):
 
 
 def _reference_ahead(lane, ego, settings):
-    points = _clean_reference(lane.center_line)
-    projection = project_polyline(points, ego.x, ego.y)
+    current_points = _clean_reference(lane.center_line)
+    points = current_points
+    if lane.forward_reference_valid is True:
+        points = _clean_reference(lane.forward_reference)
+        if (len(points) < len(current_points) or points[:len(current_points)] != current_points
+                or not isinstance(lane.forward_lane_ids, list) or not lane.forward_lane_ids
+                or lane.forward_lane_ids[0] != lane.lane_id):
+            raise ValueError("forward reference does not preserve current lane geometry")
+    # Anchor progress to the reported current lane. A later self-crossing or
+    # nearby successor must not move the vehicle to a future route segment.
+    projection = project_polyline(current_points, ego.x, ego.y)
     if projection is None or projection["distance"] > settings.max_lateral_error:
         raise ValueError("vehicle too far from reference; lateral recovery unsupported")
     if projection["index"] == 0 and projection["raw_ratio"] < -EPS:
         raise ValueError("vehicle before known reference; extrapolation unsupported")
+    source_distances = [0.0]
+    for a, b in zip(points, points[1:]):
+        source_distances.append(source_distances[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    if not all(number(s) for s in source_distances):
+        raise ValueError("reference length overflow")
+    geometry = (list(zip(source_distances, points)), projection["s"])
     if projection["index"] == len(points) - 2 and projection["raw_ratio"] >= 1.0:
-        return [], 0.0
+        return [], 0.0, geometry
     path = [projection["point"]]
     for point in points[projection["index"] + 1:]:
         if math.hypot(point[0] - path[-1][0], point[1] - path[-1][1]) > EPS:
             path.append(point)
     if len(path) < 2:
-        return [], 0.0
+        return [], 0.0, geometry
     heading = math.atan2(path[1][1] - path[0][1], path[1][0] - path[0][0])
     if abs(normalize_angle(heading - ego.heading)) > settings.max_heading_error:
         raise ValueError("reference direction disagrees with vehicle heading")
@@ -79,7 +95,7 @@ def _reference_ahead(lane, ego, settings):
         distances.append(distances[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
     if not all(number(s) for s in distances):
         raise ValueError("reference length overflow")
-    return list(zip(distances, path)), distances[-1]
+    return list(zip(distances, path)), distances[-1], geometry
 
 
 def _sample(reference, horizon, spacing):
@@ -111,20 +127,47 @@ def _sample(reference, horizon, spacing):
     return samples
 
 
-def _curve_limits(samples, settings):
+def _curve_limits(samples, settings, geometry=None):
     headings = [math.atan2(b[1][1] - a[1][1], b[1][0] - a[1][0])
                 for a, b in zip(samples, samples[1:])]
-    limits = [float("inf")] * len(samples)
     for i in range(1, len(samples) - 1):
         turn = abs(normalize_angle(headings[i] - headings[i - 1]))
         if turn > settings.max_corner_angle:
             raise ValueError("sharp reference corner; smooth road geometry required")
+    # Extra collinear samples and a sliding ego projection change adjacent
+    # sample lengths without changing the road. Estimate turn/length only on
+    # the full original map geometry, including vertices behind the ego.
+    source, origin_s = geometry if geometry is not None else (samples, 0.0)
+    source_headings = [math.atan2(b[1][1] - a[1][1], b[1][0] - a[1][0])
+                       for a, b in zip(source, source[1:])]
+    source_limits = [float("inf")] * len(source)
+    for i in range(1, len(source) - 1):
+        turn = abs(normalize_angle(source_headings[i] - source_headings[i - 1]))
         if turn > EPS:
-            length = (samples[i + 1][0] - samples[i - 1][0]) * 0.5
+            length = (source[i + 1][0] - source[i - 1][0]) * 0.5
             limit = math.sqrt(settings.lateral_acceleration * length / turn)
             # Apply the vertex limit on both sides, not just at a single point.
             for j in (i - 1, i, i + 1):
-                limits[j] = min(limits[j], limit)
+                source_limits[j] = min(source_limits[j], limit)
+    limits, index = [], 0
+    for s, _ in samples:
+        position = origin_s + s
+        while index + 1 < len(source) - 1 and source[index + 1][0] < position - EPS:
+            index += 1
+        left_s, right_s = source[index][0], source[index + 1][0]
+        left, right = source_limits[index], source_limits[index + 1]
+        if position <= left_s + EPS:
+            limit = left
+        elif position >= right_s - EPS:
+            limit = right
+        elif math.isfinite(left) and math.isfinite(right):
+            ratio = (position - left_s) / (right_s - left_s)
+            limit = math.sqrt(left ** 2 + ratio * (right ** 2 - left ** 2))
+        else:
+            # A finite vertex ahead is still present in samples; the backward
+            # braking pass propagates its constraint across a straight edge.
+            limit = float("inf")
+        limits.append(limit)
     # Unwrap headings so crossing +/-pi does not create a 2*pi jump.
     unwrapped = [headings[0]]
     for heading in headings[1:]:
@@ -176,7 +219,7 @@ def build_trajectory(perception, decision, settings=None):
         ego = perception.ego
         if (not current(perception) or ego.valid is not True
                 or not all(number(v) for v in (ego.x, ego.y, ego.heading, ego.speed, ego.vx, ego.vy))
-                or ego.speed < 0 or type(ego.gear) is not int or ego.gear not in (0, 1, 2, 3)):
+                or ego.speed < 0 or type(ego.gear) is not int):
             raise ValueError("invalid or expired ego state")
         if decision.stop_distance < 0 and decision.stop_distance != -1:
             raise ValueError("unknown stop distance must be -1")
@@ -200,8 +243,10 @@ def build_trajectory(perception, decision, settings=None):
 
 def _moving_reference(output, perception, decision, settings):
     ego, lane = perception.ego, perception.lane
-    if ego.gear == 2 or (number(ego.vx) and number(ego.vy) and
-                         ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -EPS):
+    # GPS gear is a raw gearbox position, not the driver's command enum.
+    # Determine actual reverse motion from the signed longitudinal velocity.
+    if (number(ego.vx) and number(ego.vy) and
+            ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -EPS):
         raise ValueError("reverse trajectory unsupported")
     if decision.mode == DecisionMode.STOP and decision.stop_distance < 0:
         raise ValueError("STOP requires nonnegative GPS-reference stop_distance")
@@ -214,11 +259,17 @@ def _moving_reference(output, perception, decision, settings):
         raise ValueError("map lane unavailable")
     # Vehicle footprint and obstacle prediction contracts have not been supplied.
     # Fail explicitly instead of claiming an unchecked moving path is collision-free.
-    if perception.targets_valid is not True:
+    status = perception.source_status.get("targets", {})
+    optional_unavailable = (not requires_targets(perception.scene_id)
+                            and (perception.targets_valid is not True
+                                 or perception.target_source == "ground_truth"
+                                 or (isinstance(status, dict)
+                                     and status.get("sensor_presence") == "not_configured")))
+    if perception.targets_valid is not True and not optional_unavailable:
         raise ValueError("target observations unavailable; clear-road baseline requires valid observations")
-    if not isinstance(perception.targets, list) or perception.targets:
+    if not isinstance(perception.targets, list) or (perception.targets and not optional_unavailable):
         raise ValueError("obstacle-aware planning unavailable; baseline requires empty targets")
-    reference, remaining = _reference_ahead(lane, ego, settings)
+    reference, remaining, geometry = _reference_ahead(lane, ego, settings)
     if remaining <= EPS:
         output.stop_distance = 0.0
         _hold(output, ego, ego.speed > EPS, "end of known reference", settings)
@@ -236,7 +287,7 @@ def _moving_reference(output, perception, decision, settings):
         return
     horizon = min(settings.horizon, stop)
     samples = _sample(reference, horizon, settings.spacing)
-    headings, curve_limits = _curve_limits(samples, settings)
+    headings, curve_limits = _curve_limits(samples, settings, geometry)
     desired = ego.speed if decision.mode == DecisionMode.STOP else decision.target_speed
     speeds = _speed_profile(samples, curve_limits, ego.speed, desired, stop, settings)
     if speeds is None:
@@ -252,4 +303,8 @@ def _moving_reference(output, perception, decision, settings):
         output.points.append(TrajectoryPoint(x, y, speed, heading, elapsed))
     output.target_speed = 0.0 if stopping else decision.target_speed
     output.valid = True
-    output.reason = "clear-road lane reference; vehicle footprint and tracking not validated"
+    output.reason = ("lane reference with optional target observations unavailable; collision clearance unverified"
+                     if optional_unavailable else
+                     "clear-road lane reference; vehicle footprint and tracking not validated")
+    if lane.forward_reference_valid is True:
+        output.reason += "; forward reference: " + lane.forward_reference_status

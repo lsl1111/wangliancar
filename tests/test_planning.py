@@ -104,6 +104,68 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(stopped, result.stop_required)
             self.assertEqual(0.0 if stopped else 4.0, result.points[-1].speed)
 
+    def test_forward_reference_continues_at_current_lane_end(self):
+        for x in (19.75, 20.0):
+            p, d = scene(0.0, 3.0, 20.0)
+            p.ego.x = x
+            p.lane.forward_reference = [(0, 0), (20, 0), (180, 0)]
+            p.lane.forward_reference_valid = True
+            p.lane.forward_lane_ids = [p.lane.lane_id, "next"]
+            p.lane.forward_reference_status = "map_end"
+            result = plan(p, d)
+            self.assert_profile(result, d)
+            self.assertFalse(result.stop_required)
+            self.assertGreater(result.points[-1].x, 70)
+            self.assertEqual(3.0, result.points[-1].speed)
+            self.assertGreater(result.points[1].speed, 0.0)
+
+    def test_forward_reference_does_not_jump_to_nearby_future_lane(self):
+        p, d = scene(0.0, 3.0, 20.0)
+        p.ego.x, p.ego.y = 5.0, 0.1
+        p.lane.forward_reference = [(0, 0), (20, 0), (100, 20), (5, 0.1), (-10, 0.1)]
+        p.lane.forward_reference_valid = True
+        p.lane.forward_lane_ids = [p.lane.lane_id, "future"]
+        # The future exact match lies outside this frame's 60 m horizon.
+        result = plan(p, d)
+        self.assert_profile(result, d)
+        self.assertEqual((5.0, 0.0), (result.points[0].x, result.points[0].y))
+
+    def test_declared_forward_reference_requires_matching_current_prefix(self):
+        for field in ("geometry", "lane_ids", "points"):
+            p, d = scene(0.0, 3.0, 20.0)
+            p.lane.forward_reference = [(0, 0), (20, 0), (180, 0)]
+            p.lane.forward_reference_valid = True
+            p.lane.forward_lane_ids = [p.lane.lane_id, "next"]
+            if field == "geometry": p.lane.forward_reference[1] = (20, 0.1)
+            if field == "lane_ids": p.lane.forward_lane_ids[0] = "wrong"
+            if field == "points": p.lane.forward_reference = []
+            self.assertFalse(plan(p, d).valid, field)
+
+    def test_unavailable_continuation_still_stops_at_known_boundary(self):
+        p, d = scene(1.0, 3.0, 15.0)
+        p.lane.forward_reference = p.lane.center_line[:]
+        p.lane.forward_reference_valid = True
+        p.lane.forward_lane_ids = [p.lane.lane_id]
+        p.lane.forward_reference_status = "ambiguous_successor"
+        result = plan(p, d)
+        self.assert_profile(result, d)
+        self.assertTrue(result.stop_required)
+        self.assertEqual(0.0, result.points[-1].speed)
+        self.assertIn("ambiguous_successor", result.reason)
+
+    def test_explicit_stop_is_kept_on_a_continuous_reference(self):
+        p, d = scene(2.0, 0.0, 20.0)
+        p.ego.x = 19.75
+        d.mode, d.stop_distance = DecisionMode.STOP, 5.0
+        p.lane.forward_reference = [(0, 0), (20, 0), (180, 0)]
+        p.lane.forward_reference_valid = True
+        p.lane.forward_lane_ids = [p.lane.lane_id, "next"]
+        result = plan(p, d)
+        self.assert_profile(result, d)
+        self.assertTrue(result.stop_required)
+        self.assertEqual(0.0, result.points[-1].speed)
+        self.assertEqual(24.75, result.points[-1].x)
+
     def test_short_path_from_rest_has_a_nonzero_interior_speed(self):
         p, d = scene(0.0, 1.0, 0.4)
         result = plan(p, d)
@@ -177,12 +239,33 @@ class PlanningTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("corner", result.reason)
 
+    def test_curve_speed_is_stable_across_ego_progress_and_sampling_phase(self):
+        radius = 30.0
+        road = [(radius * math.cos(i * 0.02), radius * math.sin(i * 0.02))
+                for i in range(181)]
+        expected_limit = math.sqrt(1.5 * radius)
+        for angle in (1.0, 1.005, 1.01, 1.015, 1.019, 1.02):
+            for spacing in (0.35, 1.0, 1.7):
+                with self.subTest(angle=angle, spacing=spacing):
+                    p, d = scene(5.5, 30.0 / 3.6)
+                    p.lane.center_line = road
+                    p.ego.x, p.ego.y = radius * math.cos(angle), radius * math.sin(angle)
+                    p.ego.heading = angle + math.pi / 2
+                    p.ego.vx = p.ego.speed * math.cos(p.ego.heading)
+                    p.ego.vy = p.ego.speed * math.sin(p.ego.heading)
+                    settings = PlannerSettings(spacing=spacing)
+                    result = build_trajectory(p, d, settings)
+                    self.assert_profile(result, d, settings)
+                    self.assertFalse(result.emergency_stop)
+                    self.assertAlmostEqual(expected_limit, result.points[-1].speed, delta=0.001)
+                    self.assertLessEqual(max(point.speed for point in result.points), expected_limit)
+
     def test_pose_mismatch_reverse_and_unsupported_lane(self):
         for change in ("offset", "heading", "reverse", "reverse_velocity", "other_lane", "before"):
             p, d = scene()
             if change == "offset": p.ego.y = 0.6
             if change == "heading": p.ego.heading = math.pi
-            if change == "reverse": p.ego.gear = 2
+            if change == "reverse": p.ego.gear, p.ego.vx = -1, -5.0
             if change == "reverse_velocity": p.ego.vx = -5.0
             if change == "other_lane": d.target_lane_id = "lane-b"
             if change == "before": p.ego.x = -0.1
@@ -197,6 +280,34 @@ class PlanningTests(unittest.TestCase):
             if unavailable: p.targets_valid = False
             else: p.targets = [Target()]
             self.assertFalse(plan(p, d).valid)
+
+    def test_optional_target_absence_or_unknown_configuration_allows_lane_reference(self):
+        for scene_id, presence in ((4, "not_configured"), (6, "not_configured"),
+                                   (6, "unknown"), (6, "configured")):
+            p, d = scene(0.0, 2.0)
+            p.scene_id, p.targets_valid = scene_id, False
+            p.source_status["targets"] = {"sensor_presence": presence}
+            self.assert_profile(plan(p, d), d)
+            self.assertIn("unverified", plan(p, d).reason)
+            # Ground Truth remains diagnostic when there is no target sensor.
+            p.targets_valid, p.targets = True, [Target()]
+            p.target_source = "ground_truth"
+            self.assert_profile(plan(p, d), d)
+        for scene_id, presence in ((1, "not_configured"), (0, "not_configured"),
+                                   (1, "unknown"), (1, "configured")):
+            p, d = scene(0.0, 2.0)
+            p.scene_id, p.targets_valid = scene_id, False
+            p.source_status["targets"] = {"sensor_presence": presence}
+            self.assertFalse(plan(p, d).valid)
+
+    def test_fresh_optional_sensor_target_still_requires_obstacle_aware_planning(self):
+        p, d = scene(0.0, 2.0)
+        p.scene_id, p.target_source = 6, "sensor:optional"
+        p.source_status["targets"] = {"usable": True, "sensor_presence": "configured"}
+        p.targets = [Target()]
+        result = plan(p, d)
+        self.assertFalse(result.valid)
+        self.assertIn("obstacle-aware", result.reason)
 
     def test_follow_only_consumes_supplied_speed_no_following_policy(self):
         p, d = scene(6.0, 3.0)

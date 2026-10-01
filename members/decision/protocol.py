@@ -10,16 +10,19 @@ from core.validation import current, number
 
 
 def perception_usable(perception):
-    """Ego frame is present, finite and unexpired."""
+    """Ego frame is present, finite, unexpired and source-authorized.
+
+    GPS gear is raw feedback, not the ControlOut N/D/R/P command enum.
+    """
     return (
         current(perception)
         and perception.ego.valid is True
+        and source_usable(perception, "gps")
         and all(number(value) for value in (
             perception.ego.x, perception.ego.y, perception.ego.heading,
             perception.ego.speed, perception.ego.vx, perception.ego.vy))
         and perception.ego.speed >= 0.0
         and type(perception.ego.gear) is int
-        and perception.ego.gear in (0, 1, 2, 3)
     )
 
 
@@ -30,17 +33,22 @@ def source_usable(perception, name):
     ego frame, and a readable-but-empty target list must not be read as a
     clear road, so neither is used as a substitute here.
     """
-    status = perception.source_status.get(name)
+    statuses = getattr(perception, "source_status", None)
+    if not isinstance(statuses, dict):
+        return False
+    status = statuses.get(name)
     if not isinstance(status, dict):
         return False
     return status.get("usable") is True
 
 
 def targets_usable(perception):
-    """Target observations are fresh, distinct from the ego frame and parsed."""
+    """Parsed, source-authorized Sensor API observations; Ground Truth excluded."""
     if perception.targets_valid is not True or not isinstance(perception.targets, list):
         return False
-    return source_usable(perception, "targets")
+    source = perception.target_source
+    return (isinstance(source, str) and source.startswith("sensor:")
+            and source_usable(perception, "targets"))
 
 
 def lane_usable(perception):

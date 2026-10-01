@@ -7,9 +7,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from core.config import load_config
 from core.interfaces import ControlOut, DecisionMode, DecisionTarget, LaneContext, Trajectory
 from core.serialization import perception_to_dict
-from members.decision_stub import decide
+from members.decision_stub import decide, reset_decision
+from members.decision.settings import DecisionSettings
+from members.control_stub import compute_control, configure_control
 from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, _orient_forward
@@ -41,6 +44,8 @@ class StraightLane(object):
 
 class DataChainTests(unittest.TestCase):
     def setUp(self):
+        # These contract tests exercise an explicitly configured low-speed run.
+        reset_decision(DecisionSettings(cruise_speed=2.0))
         self.adapter = EmptyTraffic()
         self.builder = PerceptionBuilder(self.adapter, StraightLane())
         self.builder.update_case_info()
@@ -98,6 +103,23 @@ class DataChainTests(unittest.TestCase):
         raw = self.raw()
         raw["targets_age_ms"] = 600
         self.assertFalse(self.builder.build_from_raw(raw).targets_valid)
+
+    def test_scene_six_decision_ignores_unavailable_targets(self):
+        raw = self.raw()
+        raw["targets_valid"] = False
+        raw["targets"] = [{"id": 7, "x": 1, "y": 0, "probability": 1.0}]
+        raw["source_status"] = {"targets": {"read_ok": False,
+                                                "sensor_presence": "not_configured"}}
+        value = self.builder.build_from_raw(raw)
+        self.assertEqual(6, value.scene_id)
+        self.assertNotIn("TARGETS_UNAVAILABLE", value.errors)
+        self.assertEqual("not_configured", value.source_status["targets"]["quality"])
+        self.assertEqual(DecisionMode.KEEP_LANE, decide(value).mode)
+        value.scene_id = 1
+        decide(value)
+        value.frame_id += 1
+        value.timestamp += 1
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, decide(value).mode)
         raw = self.raw()
         raw["targets_frame"] = 5
         self.assertFalse(self.builder.build_from_raw(raw).targets_valid)
@@ -120,6 +142,7 @@ class DataChainTests(unittest.TestCase):
                         {"status": 1, "opendrive_id": 2, "stop_line_x": 40.1,
                          "stop_line_y": 0.0, "count_down": 10}]
         builder = PerceptionBuilder(MixedLights(), StraightLane())
+        builder.update_case_info()
         value = builder.build_from_raw(self.raw())
         self.assertTrue(value.traffic.observed)
         self.assertTrue(value.traffic.ambiguous)
@@ -140,6 +163,71 @@ class DataChainTests(unittest.TestCase):
         self.assertTrue(emergency.emergency_stop)
         self.assertEqual(0.0, emergency.target_speed)
         self.assertTrue(all(point.speed == 0.0 for point in emergency.points))
+
+    def test_scene_six_reaches_control_diagnostics_without_target_sensor(self):
+        raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
+        raw["targets_valid"] = False
+        raw["source_status"] = {"targets": {"read_ok": False,
+                                                "sensor_presence": "not_configured"}}
+        p = self.builder.build_from_raw(raw)
+        d = decide(p)
+        self.assertEqual(DecisionMode.KEEP_LANE, d.mode)
+        self.assertEqual(2.0, d.target_speed)
+        t = plan(p, d)
+        self.assertTrue(t.valid, t.errors)
+        self.assertEqual(2.0, t.target_speed)
+        self.assertEqual(0.0, t.points[0].speed)
+        self.assertGreater(t.points[1].speed, 0.0)
+        configure_control(SimpleNamespace(control_calibrated=False))
+        control = compute_control(p, t)
+        self.assertFalse(control.valid)
+        self.assertIn("reference_speed_mps", control.diagnostics)
+        self.assertIn("vehicle calibration required", control.errors)
+        project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config = load_config(project)
+        self.assertFalse(config.send_control)
+        configure_control(config)
+        trial = compute_control(p, t)
+        self.assertTrue(trial.valid, trial.errors)
+        self.assertGreater(trial.throttle, 0.0)
+
+    def test_shared_low_speed_target_requires_scene_inputs(self):
+        raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
+        p = self.builder.build_from_raw(raw)
+        p.scene_id = 4
+        self.assertEqual(2.0, decide(p).target_speed)
+        p.scene_id = 1
+        decide(p)
+        p.frame_id += 1
+        p.timestamp += 1
+        self.assertEqual(DecisionMode.STOP, decide(p).mode)
+        p.target_source = "sensor:perfectPerception1"
+        p.source_status["targets"]["usable"] = True
+        for unused in range(2):
+            p.frame_id += 1
+            p.timestamp += 1
+            decision = decide(p)
+        self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
+        self.assertEqual(2.0, decision.target_speed)
+
+    def test_scene_six_launch_yields_to_required_stop(self):
+        raw = self.raw(x=50)
+        raw["gps"]["vx"] = 0.0
+        p = self.builder.build_from_raw(raw)
+        p.traffic.observed = True
+        p.traffic.signal_state = "RED"
+        p.traffic.stop_line_distance = 20.0
+        decision = decide(p)
+        self.assertEqual(DecisionMode.STOP, decision.mode)
+        self.assertEqual(0.0, decision.target_speed)
+        self.assertEqual(17.0, decision.stop_distance)
+        p.traffic.observed = False
+        p.lane.valid = False
+        decision = decide(p)
+        self.assertEqual(DecisionMode.STOP, decision.mode)
+        self.assertEqual(0.0, decision.target_speed)
 
     def test_curved_lane_uses_local_direction_and_reverses_boundaries(self):
         points = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (-10, 10, 0)]
@@ -218,7 +306,8 @@ class DataChainTests(unittest.TestCase):
                 return True
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(runtime_dir=directory, loop_hz=20,
-                                     send_control=True, publish_json=True)
+                                     send_control=True, safety_brake_enabled=True,
+                                     publish_json=True)
             runtime = CaptainRuntime(config, SimpleNamespace(
                 info=lambda *args: None, warning=lambda *args: None))
             runtime.adapter = MockAdapter()

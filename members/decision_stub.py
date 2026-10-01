@@ -2,7 +2,20 @@
 
 from members.decision.engine import DecisionEngine
 
+DECISION_VERSION = "7002f85+integration-compat"
 _ENGINE = DecisionEngine()
+
+
+def reset_decision(settings=None):
+    """Start a new runtime session without carrying prior blind-stop state."""
+    global _ENGINE
+    _ENGINE = DecisionEngine(settings)
+
+
+def decision_info():
+    """Expose the running implementation and tuning for launcher diagnostics."""
+    return {"version": DECISION_VERSION, "engine": type(_ENGINE).__name__,
+            "cruise_speed": float(_ENGINE.settings.cruise_speed)}
 
 
 def decide(perception):
