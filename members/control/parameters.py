@@ -62,20 +62,36 @@ class ControllerSettings(object):
         self.turn_exit_margin_m = 1.0
         self.max_segment_m = 12.0
         self.max_projection_error_m = 2.0
+        self.projection_progress_slack_m = 0.75
         self.max_heading_error_rad = math.pi / 2
         self.path_end_margin_m = 0.5
         self.preview_decel_mps2 = 2.0
         self.launch_preview_m = 1.0
         self.launch_accel_mps2 = 1.0
         self.max_track_speed_mps = 30.0 / 3.6
+        self.max_reverse_speed_mps = 1.5
+        self.reverse_lookahead_min_m = 0.8
+        self.reverse_lookahead_max_m = 3.0
+        self.gear_standstill_speed_mps = 0.05
+        self.gear_standstill_s = 0.3
+        self.gear_engage_s = 0.3
+        self.precision_end_margin_m = 0.05
+        self.precision_arrival_tolerance_m = 0.15
+        self.precision_heading_tolerance_rad = 0.15
+        self.precision_speed_mps = 0.05
+        self.precision_approach_gain_per_s = 1.0
         self.pi_kp = 1.0
         self.pi_ki = 0.25
         # Convert profile acceleration (m/s^2) to PI demand (m/s). Trial gain;
         # it is not an inverse model of SimOne's engine or brake system.
         self.acceleration_feedforward_s = 0.5
         self.acceleration_preview_m = 1.0
-        self.integral_limit = 3.0
+        # Permit a steady load demand up to 2.5 m/s at the default Ki.
+        # The trial mapping needs this to reach its 0.25 throttle ceiling;
+        # pedal saturation/slew still prevent integration into unmet demand.
+        self.integral_limit = 10.0
         self.control_deadband_mps = 0.08
+        self.crawl_deadband_ratio = 0.1
         self.hold_speed_mps = 0.2
         self.hold_release_speed_mps = 0.5
         self.hold_release_frames = 2
@@ -98,6 +114,13 @@ class ControllerSettings(object):
         if (self.lookahead_min_m > self.lookahead_max_m or
                 self.hold_speed_mps >= self.hold_release_speed_mps or
                 self.max_heading_error_rad > math.pi / 2 or
-                self.steering_preview_s > 0.5):
+                self.steering_preview_s > 0.5 or
+                self.reverse_lookahead_min_m > self.reverse_lookahead_max_m or
+                self.precision_end_margin_m >= self.precision_arrival_tolerance_m or
+                self.precision_heading_tolerance_rad > self.max_heading_error_rad or
+                self.max_reverse_speed_mps > self.max_track_speed_mps or
+                self.gear_standstill_speed_mps > self.hold_speed_mps):
             raise ValueError("inconsistent controller bounds")
+        if self.crawl_deadband_ratio >= 1:
+            raise ValueError("crawl deadband ratio must be less than one")
         return self
