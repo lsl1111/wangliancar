@@ -51,6 +51,11 @@ class ControlEngine(object):
         self.release_frames = 0
         self.direction = DirectionInterlock()
         self.standstill = StandstillGuard()
+        self._forget_projection()
+
+    def _forget_projection(self):
+        self.path_signature = self.path_progress = None
+        self.path_speed = 0.0
 
     def _invalid(self, output, reason):
         self.integral = 0.0
@@ -59,6 +64,7 @@ class ControlEngine(object):
         self.state = "FAULT_STOP"
         self.direction.disarm()
         self.standstill.interrupt()
+        self._forget_projection()
         output.throttle = output.brake = output.steering = 0.0
         output.source = "control:FAULT_STOP"
         output.errors.append(reason)
@@ -72,6 +78,8 @@ class ControlEngine(object):
         if state != "HOLD":
             self.release_frames = 0
         self.state = state
+        if state in ("GEAR_STOP", "GEAR_ENGAGE"):
+            self._forget_projection()
         output.gear = gear
         output.throttle = output.steering = 0.0
         output.brake = (self.calibration.hold_brake
@@ -109,15 +117,13 @@ class ControlEngine(object):
             output.bind(trajectory)
             case = (perception.case_id, perception.case_name,
                     getattr(perception, "task_id", ""), perception.scene_id)
-            if self.case != case:
-                self.reset()
-                self.case = case
-            if (type(perception.frame_id) is not int or
-                    (self.last_frame is not None and
-                     perception.frame_id < self.last_frame)):
+            case_changed = self.case != case
+            if type(perception.frame_id) is not int or perception.frame_id < 0:
                 return self._invalid(output, "non-increasing perception frame")
-            dt = 0.0 if self.last_time is None else now - self.last_time
-            if self.last_time is not None and (dt < 0 or dt > self.settings.max_dt_s or
+            frame_rollback = (not case_changed and self.last_frame is not None
+                              and perception.frame_id < self.last_frame)
+            dt = 0.0 if case_changed or self.last_time is None else now - self.last_time
+            if not case_changed and self.last_time is not None and (dt < 0 or dt > self.settings.max_dt_s or
                     (dt == 0 and perception.frame_id != self.last_frame)):
                 self.last_frame, self.last_time = perception.frame_id, now
                 return self._invalid(output, "control loop dt outside bound")
@@ -135,6 +141,22 @@ class ControlEngine(object):
             if type(ego.gear) is not int:
                 raise ValueError("invalid GPS gear position")
             validate_output(trajectory, Trajectory, perception)
+            if case_changed:
+                # Invalid packets with a changed task/case label cannot erase
+                # an already accepted minimum standstill obligation.
+                self.reset()
+                self.case = case
+            elif frame_rollback:
+                # Reject a trusted discontinuity and re-arm from subsequent
+                # fresh frames, without waiting for the old high-water mark.
+                # An unfinished dwell survives a same-context discontinuity;
+                # only an explicit run/context reset can erase that obligation.
+                standstill = self.standstill
+                self.reset()
+                self.standstill = standstill
+                self.case = case
+                self.last_frame, self.last_time = perception.frame_id, now
+                return self._invalid(output, "non-increasing perception frame")
             if perception.frame_id == self.last_frame:
                 # Runtime must not resend a normal command on a repeated GPS
                 # frame. Keep PI/slew/HOLD memory until a genuinely new frame;
@@ -159,6 +181,7 @@ class ControlEngine(object):
                 self.state = "EMERGENCY"
                 self.direction.disarm()
                 self.standstill.interrupt()
+                self._forget_projection()
                 output.diagnostics["state"] = self.state
                 if self.calibration is None:
                     return self._invalid(output, "vehicle calibration required")
@@ -189,6 +212,7 @@ class ControlEngine(object):
             output.diagnostics["requested_gear"] = output.gear
             output.diagnostics["signed_body_speed_mps"] = signed_speed
             if _stationary_stop(trajectory):
+                self._forget_projection()
                 origin = trajectory.points[0]
                 if math.hypot(ego.x - origin.x, ego.y - origin.y) > self.settings.max_projection_error_m:
                     raise ValueError("stationary stop is too far from vehicle")
@@ -212,10 +236,16 @@ class ControlEngine(object):
 
             path = PreparedPath(trajectory.points, self.settings.max_segment_m,
                                 self.settings.curve_window_m)
+            signature = (direction, tuple(point[:2] for point in path.points))
+            hint = self.path_progress if signature == self.path_signature else None
+            delta = (max(ego.speed, self.path_speed)*dt +
+                     self.settings.projection_progress_slack_m)
             progress, cross_track, heading_error = path.project(
                 ego.x, ego.y, ego.heading + (math.pi if direction == -1 else 0.0),
                 self.settings,
-                self.settings.precision_arrival_tolerance_m if precision else 0.0)
+                self.settings.precision_arrival_tolerance_m if precision else 0.0,
+                hint, delta)
+            self.path_signature, self.path_progress, self.path_speed = signature, progress, ego.speed
             reference, remaining = path.speed_reference(progress, trajectory,
                                                         self.settings)
             curve_limit = path.curve_speed_limit(progress, self.settings)
@@ -226,10 +256,17 @@ class ControlEngine(object):
             output.diagnostics.update({
                 "path_progress_m": progress, "path_remaining_m": remaining,
                 "cross_track_abs_m": cross_track, "heading_error_rad": heading_error,
+                "projection_continuity_used": hint is not None,
                 "curve_speed_limit_mps": curve_limit,
                 "reference_speed_mps": reference,
                 "speed_error_mps": reference - ego.speed})
-            hold_speed = (self.settings.precision_speed_mps if precision or direction == -1
+            if precision:
+                stop_heading = path.heading_at(min(path.length, progress + trajectory.stop_distance))
+                stop_heading_error = normalize_angle(stop_heading - ego.heading)
+                output.diagnostics["stop_heading_error_rad"] = stop_heading_error
+            crawl_intent = (trajectory.target_speed > 0 and
+                            0 < reference <= self.settings.hold_release_speed_mps)
+            hold_speed = (self.settings.precision_speed_mps if precision or direction == -1 or crawl_intent
                           else self.settings.hold_speed_mps)
             hold_request = reference <= hold_speed and ego.speed <= hold_speed
             # At a finite path end there may be no valid forward carrot left,
@@ -248,7 +285,7 @@ class ControlEngine(object):
                 return output
             if hold_request or self.state in ("HOLD", "DWELL"):
                 release_speed = (self.settings.precision_speed_mps
-                                 if precision or direction == -1
+                                 if precision or direction == -1 or crawl_intent
                                  else self.settings.hold_release_speed_mps)
                 if (not hold_request and trajectory.target_speed > 0 and
                         reference >= release_speed):
@@ -263,6 +300,8 @@ class ControlEngine(object):
                         arrived = (arrived and cross_track <=
                                    self.settings.precision_arrival_tolerance_m and
                                    abs(heading_error) <=
+                                   self.settings.precision_heading_tolerance_rad and
+                                   abs(stop_heading_error) <=
                                    self.settings.precision_heading_tolerance_rad)
                     output.diagnostics["stop_pose_arrived"] = arrived
                     return self._hold_output(output, ego, trajectory, arrived)

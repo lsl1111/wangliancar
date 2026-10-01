@@ -62,6 +62,7 @@ class ControllerSettings(object):
         self.turn_exit_margin_m = 1.0
         self.max_segment_m = 12.0
         self.max_projection_error_m = 2.0
+        self.projection_progress_slack_m = 0.75
         self.max_heading_error_rad = math.pi / 2
         self.path_end_margin_m = 0.5
         self.preview_decel_mps2 = 2.0
@@ -85,8 +86,12 @@ class ControllerSettings(object):
         # it is not an inverse model of SimOne's engine or brake system.
         self.acceleration_feedforward_s = 0.5
         self.acceleration_preview_m = 1.0
-        self.integral_limit = 3.0
+        # Permit a steady load demand up to 2.5 m/s at the default Ki.
+        # The trial mapping needs this to reach its 0.25 throttle ceiling;
+        # pedal saturation/slew still prevent integration into unmet demand.
+        self.integral_limit = 10.0
         self.control_deadband_mps = 0.08
+        self.crawl_deadband_ratio = 0.1
         self.hold_speed_mps = 0.2
         self.hold_release_speed_mps = 0.5
         self.hold_release_frames = 2
@@ -116,4 +121,6 @@ class ControllerSettings(object):
                 self.max_reverse_speed_mps > self.max_track_speed_mps or
                 self.gear_standstill_speed_mps > self.hold_speed_mps):
             raise ValueError("inconsistent controller bounds")
+        if self.crawl_deadband_ratio >= 1:
+            raise ValueError("crawl deadband ratio must be less than one")
         return self
