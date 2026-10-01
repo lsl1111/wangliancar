@@ -25,6 +25,20 @@ def scene(speed=5.0, target=5.0, length=200.0):
     return p, d
 
 
+def sensor_target(perception, x=30.0, y=0.0, vx=0.0, vy=0.0,
+                  length=4.0, width=2.0):
+    target = Target()
+    target.valid = True
+    target.id = 1
+    target.x, target.y = x, y
+    target.vx, target.vy = vx, vy
+    target.length, target.width = length, width
+    perception.targets = [target]
+    perception.target_source = "sensor:test"
+    perception.source_status["targets"] = {"usable": True}
+    return target
+
+
 class PlanningTests(unittest.TestCase):
     def assert_profile(self, result, decision, settings=None):
         settings = settings or PlannerSettings()
@@ -203,12 +217,16 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(speed > 0, result.emergency_stop)
             self.assertTrue(all(point.x == x and point.speed == 0 for point in result.points))
 
-    def test_unknown_stop_distance_is_rejected_instead_of_assumed_zero(self):
-        p, d = scene()
-        d.mode = DecisionMode.STOP
-        result = plan(p, d)
-        self.assertFalse(result.valid)
-        self.assertIn("stop_distance", result.reason)
+    def test_unknown_stop_distance_requests_brake_without_inventing_path(self):
+        for speed in (0.0, 5.0):
+            p, d = scene(speed=speed)
+            d.mode = DecisionMode.STOP
+            result = plan(p, d)
+            self.assertTrue(result.valid, result.reason)
+            self.assertEqual(speed > 0.0, result.emergency_stop)
+            self.assertTrue(result.stop_required)
+            self.assertTrue(all(point.x == p.ego.x for point in result.points))
+            self.assertIn("unknown", result.reason)
 
     def test_duplicates_and_three_dimensional_map_points(self):
         p, d = scene()
@@ -280,6 +298,127 @@ class PlanningTests(unittest.TestCase):
             if unavailable: p.targets_valid = False
             else: p.targets = [Target()]
             self.assertFalse(plan(p, d).valid)
+
+    def test_sensor_obstacle_needs_measured_vehicle_dimensions(self):
+        p, d = scene(0.0, 8.0)
+        d.mode = DecisionMode.FOLLOW
+        sensor_target(p)
+        result = plan(p, d)
+        self.assertFalse(result.valid)
+        self.assertIn("measured vehicle", result.reason)
+
+    def test_static_lead_allows_launch_then_stops_before_full_envelope(self):
+        p, d = scene(0.0, 8.0)
+        d.mode = DecisionMode.FOLLOW
+        sensor_target(p)
+        settings = PlannerSettings(front_offset_m=3.5, half_width_m=0.9)
+        result = build_trajectory(p, d, settings)
+        self.assert_profile(result, d, settings)
+        self.assertTrue(result.stop_required)
+        self.assertEqual(8.0, result.target_speed)
+        self.assertGreater(result.points[1].speed, 0.0)
+        self.assertEqual(0.0, result.points[-1].speed)
+        envelope = 0.5 * math.hypot(4.0, 2.0) + 0.9
+        self.assertLessEqual(result.points[-1].x + 3.5 + 4.0 + envelope,
+                             30.0 + 1e-7)
+        self.assertIn("obstacle stop", result.reason)
+
+    def test_forward_lead_sequence_keeps_current_envelope_clear(self):
+        settings = PlannerSettings(front_offset_m=3.5, half_width_m=0.9)
+        for frame in range(5):
+            p, d = scene(1.0 + frame * 0.5, 6.0)
+            p.ego.x = frame * 0.5
+            d.mode = DecisionMode.FOLLOW
+            lead_x = 30.0 + frame * 0.3
+            sensor_target(p, x=lead_x, vx=6.0)
+            result = build_trajectory(p, d, settings)
+            self.assert_profile(result, d, settings)
+            envelope = 0.5 * math.hypot(4.0, 2.0) + 0.9
+            self.assertLessEqual(result.points[-1].x + 3.5 + 4.0 + envelope,
+                                 lead_x + 1e-7)
+            self.assertGreater(result.points[1].speed, 0.0)
+
+    def test_curved_reference_stops_before_target_envelope(self):
+        p, d = scene(0.0, 5.0)
+        d.mode = DecisionMode.FOLLOW
+        radius = 30.0
+        p.lane.center_line = [(radius * math.cos(i * 0.02),
+                               radius * math.sin(i * 0.02)) for i in range(81)]
+        p.ego.x, p.ego.y = p.lane.center_line[0]
+        p.ego.heading = math.pi / 2
+        target = sensor_target(p, x=radius * math.cos(0.7),
+                               y=radius * math.sin(0.7))
+        settings = PlannerSettings(front_offset_m=3.5, half_width_m=0.9)
+        result = build_trajectory(p, d, settings)
+        self.assert_profile(result, d, settings)
+        self.assertTrue(result.stop_required)
+        last = result.points[-1]
+        front_x = last.x + settings.front_offset_m * math.cos(last.heading)
+        front_y = last.y + settings.front_offset_m * math.sin(last.heading)
+        envelope = 0.5 * math.hypot(target.length, target.width) + settings.half_width_m
+        self.assertGreater(math.hypot(front_x - target.x, front_y - target.y), envelope)
+
+    def test_known_reference_end_holds_even_with_target_list(self):
+        p, d = scene(1.0, 3.0, 20.0)
+        p.ego.x = 20.0
+        sensor_target(p, x=30.0)
+        result = build_trajectory(p, d, PlannerSettings(
+            front_offset_m=3.5, half_width_m=0.9))
+        self.assertTrue(result.valid, result.reason)
+        self.assertTrue(result.emergency_stop)
+        self.assertIn("end of known reference", result.reason)
+
+    def test_verified_adjacent_target_outside_swept_path_does_not_stop(self):
+        p, d = scene(0.0, 5.0)
+        target = sensor_target(p, y=4.0)
+        target.same_lane_valid = True
+        target.lane_id = "lane-b"
+        settings = PlannerSettings(front_offset_m=3.5, half_width_m=0.9)
+        result = build_trajectory(p, d, settings)
+        self.assert_profile(result, d, settings)
+        self.assertFalse(result.stop_required)
+        self.assertGreater(result.points[1].speed, 0.0)
+
+    def test_crossing_oncoming_unknown_extent_and_untrusted_sources_fail(self):
+        settings = PlannerSettings(front_offset_m=3.5, half_width_m=0.9)
+        for change in ("crossing", "oncoming", "extent", "source"):
+            p, d = scene(2.0, 5.0)
+            target = sensor_target(p)
+            if change == "crossing": target.vy = -1.0
+            if change == "oncoming": target.vx = -2.0
+            if change == "extent": target.length = 0.0
+            if change == "source": p.target_source = "ground_truth"
+            result = build_trajectory(p, d, settings)
+            self.assertFalse(result.valid, change)
+            self.assertEqual([], result.points)
+
+    def test_fresh_optional_sensor_target_is_not_hidden_by_bad_presence_flag(self):
+        p, d = scene(0.0, 5.0)
+        p.scene_id = 6
+        sensor_target(p)
+        p.source_status["targets"]["sensor_presence"] = "not_configured"
+        result = build_trajectory(p, d, PlannerSettings(
+            front_offset_m=3.5, half_width_m=0.9))
+        self.assert_profile(result, d)
+        self.assertTrue(result.stop_required)
+        self.assertIn("obstacle stop", result.reason)
+
+    def test_vehicle_geometry_environment_requires_both_values(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"NEVC_VEHICLE_FRONT_OFFSET_M": "3.5",
+                                  "NEVC_VEHICLE_HALF_WIDTH_M": "0.9"}):
+            settings = PlannerSettings.from_environment()
+            settings.validate()
+            self.assertEqual(3.5, settings.front_offset_m)
+            self.assertEqual(0.9, settings.half_width_m)
+        with self.assertRaises(ValueError):
+            PlannerSettings(front_offset_m=3.5).validate()
+        p, d = scene()
+        with patch.dict(os.environ, {"NEVC_VEHICLE_FRONT_OFFSET_M": "bad"}):
+            failed = plan(p, d)
+        self.assertFalse(failed.valid)
+        self.assertIn("planning override", failed.reason)
 
     def test_optional_target_absence_or_unknown_configuration_allows_lane_reference(self):
         for scene_id, presence in ((4, "not_configured"), (6, "not_configured"),

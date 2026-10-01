@@ -45,7 +45,8 @@ class StraightLane(object):
 class DataChainTests(unittest.TestCase):
     def setUp(self):
         # These contract tests exercise an explicitly configured low-speed run.
-        reset_decision(DecisionSettings(cruise_speed=2.0))
+        reset_decision(DecisionSettings(cruise_speed=2.0,
+                                        front_offset_m=3.5))
         self.adapter = EmptyTraffic()
         self.builder = PerceptionBuilder(self.adapter, StraightLane())
         self.builder.update_case_info()
@@ -148,7 +149,9 @@ class DataChainTests(unittest.TestCase):
         self.assertTrue(value.traffic.ambiguous)
         self.assertFalse(value.traffic.valid)
         self.assertEqual(2, len(value.traffic.candidates))
-        self.assertEqual(DecisionMode.STOP, decide(value).mode)
+        decision = decide(value)
+        self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
+        self.assertGreater(decision.stop_distance, 0.0)
 
     def test_reference_starts_ahead_and_emergency_is_transmitted(self):
         p = self.builder.build_from_raw(self.raw(x=150))
@@ -205,7 +208,7 @@ class DataChainTests(unittest.TestCase):
         self.assertEqual(DecisionMode.STOP, decide(p).mode)
         p.target_source = "sensor:perfectPerception1"
         p.source_status["targets"]["usable"] = True
-        for unused in range(2):
+        for unused in range(3):
             p.frame_id += 1
             p.timestamp += 1
             decision = decide(p)
@@ -220,9 +223,9 @@ class DataChainTests(unittest.TestCase):
         p.traffic.signal_state = "RED"
         p.traffic.stop_line_distance = 20.0
         decision = decide(p)
-        self.assertEqual(DecisionMode.STOP, decision.mode)
-        self.assertEqual(0.0, decision.target_speed)
-        self.assertEqual(17.0, decision.stop_distance)
+        self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
+        self.assertEqual(2.0, decision.target_speed)
+        self.assertAlmostEqual(13.5, decision.stop_distance)
         p.traffic.observed = False
         p.lane.valid = False
         decision = decide(p)

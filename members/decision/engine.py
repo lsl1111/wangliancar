@@ -1,69 +1,49 @@
-"""Decision member entry logic: choose a behaviour and a numeric demand.
+"""Decision facts -> route conflicts -> constraints -> behavior state -> target.
 
-Input is the captain's `Perception`; output is a `DecisionTarget`. This member
-never touches the SDK, never outputs actuators and never plans geometry.
-
-Design rules, in priority order:
-
-1. Unknown is not safe. A source the captain marked unusable is treated as
-   absent evidence, not as an empty road.
-2. Fail safe, not silent. Every degraded decision says why in `reason`.
-3. Latched safety. A blind-stop is released only after required evidence
-   returns and the vehicle is slow enough to resume.
-4. No silent behaviour invention. Situations this member cannot resolve
-   (unverified lane membership, ambiguous signal groups, shared-lane
-   obstacles that would need steering) become a documented stop.
+This member never reads the SDK or produces trajectory points or actuators.
+The four public modes remain unchanged; state names below are private.
 """
+
+import math
 
 from core.interfaces import DecisionMode, DecisionTarget
 from core.scene_requirements import requires_targets
 
-from members.decision import candidates as candidate_rules
-from members.decision import protocol, speed_policy
+from members.decision import candidates, protocol, speed_policy
+from members.decision.constraints import ConstraintSet
 from members.decision.settings import DecisionSettings
 
 
 def _link_frame(perception, output):
-    """Copy the source frame identity without trusting the argument's type.
-
-    A malformed perception must still produce a usable-shaped decision, so the
-    frame fields are set defensively and the caller's validation catches the
-    rest. `Perception.bind` cannot be used directly here because it would
-    raise before the engine's own error handling is in place.
-    """
-    frame_id = getattr(perception, "frame_id", None)
+    frame = getattr(perception, "frame_id", None)
     timestamp = getattr(perception, "timestamp", None)
-    valid_until = getattr(perception, "valid_until", None)
-    output.frame_id = frame_id if type(frame_id) is int else -1
+    deadline = getattr(perception, "valid_until", None)
+    output.frame_id = frame if type(frame) is int else -1
     output.timestamp = timestamp if type(timestamp) is int else 0
-    output.valid_until = valid_until if type(valid_until) in (int, float) else 0.0
+    output.valid_until = deadline if type(deadline) in (int, float) else 0.0
 
 
 class DecisionEngine(object):
-    """Stateful behaviour selector.
-
-    The state exists only to protect against single-frame flapping:
-
-    - `_blind_fault_count`: consecutive frames with unusable target data
-    - `_blind_stop`: a sustained blind fault, latched until the vehicle is slow
-    """
-
     def __init__(self, settings=None):
-        # Environment overrides are read here so field tuning needs no code
-        # change and no edit to the captain's shared config file.
-        self.settings = settings if settings is not None else DecisionSettings.from_environment()
-        self.settings.validate()
+        self.settings = (settings if settings is not None
+                         else DecisionSettings.from_environment()).validate()
         self.reset()
 
     def reset(self):
-        """Discard state belonging to an earlier simulation run."""
         self._blind_fault_count = 0
         self._blind_stop = False
+        self._recovery_count = 0
+        self._fault_state = "NORMAL"
+        self._normal_state = "CRUISE"
+        self._clear_count = 0
+        self._static_targets = {}
+        self._moving_confirm = {}
+        self._had_target_conflict = False
+        self._target_clear_count = 0
         self._context = None
         self._last_frame = None
 
     def _observe_frame(self, perception):
-        """Count source frames once and reset state when a new run is seen."""
         context = (getattr(perception, "case_id", ""),
                    getattr(perception, "task_id", ""),
                    getattr(perception, "scene_id", 0))
@@ -77,177 +57,280 @@ class DecisionEngine(object):
         if context != self._context or rolled_back:
             self.reset()
             self._context = context
-        distinct = frame != self._last_frame
+        distinct = self._last_frame is None or frame_id != self._last_frame[0]
         self._last_frame = frame
         return distinct
-
-    # -- public entry ----------------------------------------------------
 
     def run(self, perception):
         output = DecisionTarget()
         try:
             _link_frame(perception, output)
             self._arbitrate(perception, output, self._observe_frame(perception))
-        except Exception as exc:  # never leave a half-filled decision
+        except Exception as exc:
             output.valid = False
             output.mode = DecisionMode.STOP
             output.target_speed = 0.0
             output.stop_distance = -1.0
-            output.reason = "decision error: " + type(exc).__name__ + ": " + str(exc)
+            output.reason = "DECISION_EXCEPTION:" + type(exc).__name__ + ":" + str(exc)
             output.errors.append("DECISION_EXCEPTION:" + type(exc).__name__)
         return output
 
-    # -- arbitration -----------------------------------------------------
+    def _source_reason(self, perception):
+        if getattr(perception, "target_source", "") == "ground_truth":
+            return "TARGET_SOURCE:ground_truth_only"
+        statuses = getattr(perception, "source_status", {})
+        status = statuses.get("targets", {}) if isinstance(statuses, dict) else {}
+        if not isinstance(status, dict):
+            return "TARGET_SOURCE:metadata_invalid"
+        if status.get("sensor_presence") == "not_configured":
+            return "TARGET_SOURCE:not_configured"
+        if status.get("sensor_read_ok") is False:
+            return "TARGET_SOURCE:sensor_read_failed"
+        quality = status.get("quality", "unknown")
+        if quality in ("stale", "unsynchronized", "regressed"):
+            return "TARGET_SOURCE:" + quality
+        if quality == "invalid" or status.get("data_invalid") is True:
+            return "TARGET_SOURCE:record_invalid"
+        return "TARGET_SOURCE:unusable,presence={0},quality={1}".format(
+            status.get("sensor_presence", "unknown"), quality)
 
-    def _arbitrate(self, perception, output, distinct_frame):
+    def _protect(self, output, ego_speed, reason, known_current=False,
+                 force_emergency=False):
+        moving = force_emergency or ego_speed > self.settings.standstill_speed
+        output.mode = DecisionMode.EMERGENCY_BRAKE if moving else DecisionMode.STOP
+        output.target_speed = 0.0
+        output.stop_distance = 0.0 if known_current or not moving else -1.0
+        output.reason = reason
+        output.valid = True
+        self._normal_state = ("HOLD" if known_current and not moving else
+                              "YIELD" if not moving else "PROTECT")
+
+    def _collect(self, perception, route, ego_speed, cruising, distinct):
+        result = ConstraintSet(cruising)
         settings = self.settings
-        if not protocol.perception_usable(perception):
-            if distinct_frame:
-                self._blind_fault_count += 1
-            self._blind_stop = True
-            self._stop(output, "ego frame unavailable, invalid or expired", None, True)
-            return
-
-        ego = perception.ego
-        ego_speed = float(ego.speed)
-        cruising = speed_policy.desired_speed(perception, settings)
-
-        # Optional sensors do not block a lane-only scene. In all scenes stale
-        # lists and Ground Truth remain diagnostic data, never lead evidence.
-        targets_fresh = protocol.targets_usable(perception)
-        targets_required = requires_targets(perception.scene_id)
-        if targets_required and not targets_fresh:
-            if distinct_frame:
-                self._blind_fault_count += 1
-            if self._blind_fault_count >= 2:
-                self._blind_stop = True
-        else:
-            self._blind_fault_count = 0
-
-        # A valid lead must not bypass recovery from an earlier blind stop.
-        # Once latched, first regain required data and slow down, then resume.
-        if self._blind_stop:
-            if targets_required and not targets_fresh:
-                self._stop(output, "target observations unusable; blind stop latched "
-                                   "until standstill", None, self._braking_required(ego_speed))
-                return
-            if ego_speed > settings.blind_speed_tolerance:
-                self._stop(output, "recovering from blind stop; still moving",
-                           None, True)
-                return
-            self._blind_stop = False
-
-        # Signal-first arbitration is retained from the delivered algorithm.
-        # Joint arbitration with closer targets remains pending (INTEGRATION.md).
         traffic = perception.traffic
         if protocol.traffic_requires_stop(traffic):
-            distance = protocol.traffic_stop_distance(traffic, settings.traffic_stop_margin)
-            if traffic.ambiguous:
-                reason = "signal group unresolved; stop until the applicable lamp is known"
-            elif traffic.observed:
-                reason = "signal state {0}".format(traffic.signal_state)
+            if settings.front_offset_m is None:
+                result.add("PROTECT", "traffic", traffic.signal_id,
+                           "TRAFFIC_DISTANCE:vehicle_front_unknown",
+                           valid_until=perception.valid_until)
             else:
-                reason = "traffic control reported without an observed signal"
-            if distance is None:
-                self._stop(output, reason + "; stop line position unknown, holding",
-                           None, self._braking_required(ego_speed))
+                distance = protocol.traffic_stop_distance(
+                    traffic, settings.front_offset_m + settings.traffic_stop_margin)
+                if distance is None:
+                    result.add("PROTECT", "traffic", traffic.signal_id,
+                               "TRAFFIC_DISTANCE:stop_line_unknown",
+                               valid_until=perception.valid_until)
+                else:
+                    result.add("STOP", "traffic", traffic.signal_id,
+                               "STOP_TRAFFIC:id={0},distance={1:.2f}".format(
+                                   traffic.signal_id, distance), distance=distance,
+                               valid_until=perception.valid_until)
+        saw_target_conflict = False
+        seen_ids = set()
+        for target in perception.targets if protocol.targets_usable(perception) else []:
+            item = candidates.build_candidate(target, perception.ego,
+                                              perception, route, settings)
+            if not item.conflict:
+                continue
+            saw_target_conflict = True
+            identifier = getattr(target, "id", -1)
+            if type(identifier) is int and identifier >= 0:
+                seen_ids.add(identifier)
+            if item.gap is not None and speed_policy.is_emergency(item, ego_speed, settings):
+                result.add("EMERGENCY", "target", identifier,
+                           "EMERGENCY_TARGET:id={0},gap={1:.2f},ttc={2:.2f}".format(
+                               identifier, item.gap, item.ttc),
+                           valid_until=perception.valid_until)
+                continue
+            if item.reason or item.gap is None:
+                result.add("PROTECT", "target", identifier,
+                           "TARGET_UNKNOWN:id={0},{1}".format(
+                               identifier, item.reason or "gap_unknown"),
+                           valid_until=perception.valid_until)
+                continue
+            if (item.relation not in (candidates.CURRENT_LANE,
+                                      candidates.FORWARD_ROUTE)
+                    or item.lead_speed < -settings.static_speed_threshold
+                    or abs(item.lateral_speed) > settings.static_speed_threshold):
+                result.add("PROTECT", "target", identifier,
+                           "TARGET_CONFLICT:id={0},relation={1}".format(
+                               identifier, item.relation),
+                           valid_until=perception.valid_until)
+                continue
+            static = item.static
+            if type(identifier) is int and identifier >= 0:
+                if static:
+                    self._static_targets[identifier] = True
+                    self._moving_confirm[identifier] = 0
+                elif self._static_targets.get(identifier):
+                    if distinct:
+                        self._moving_confirm[identifier] = (
+                            self._moving_confirm.get(identifier, 0) + 1)
+                    if self._moving_confirm[identifier] < settings.release_frames:
+                        static = True
+                    else:
+                        self._static_targets.pop(identifier, None)
+                        self._moving_confirm.pop(identifier, None)
+            if static:
+                if item.stop_distance is None:
+                    result.add("PROTECT", "target", identifier,
+                               "TARGET_STOP:distance_unknown",
+                               valid_until=perception.valid_until)
+                else:
+                    result.add("STOP", "target", identifier,
+                               "STOP_TARGET:id={0},distance={1:.2f}".format(
+                                   identifier, item.stop_distance),
+                               distance=item.stop_distance,
+                               valid_until=perception.valid_until)
             else:
-                self._stop(output, reason, distance)
-            return
+                demand = speed_policy.follow_speed(item, ego_speed, cruising, settings)
+                result.add("FOLLOW", "target", identifier,
+                           "FOLLOW_TARGET:id={0},gap={1:.2f},speed={2:.2f}".format(
+                               identifier, item.gap, demand), speed=demand,
+                           valid_until=perception.valid_until)
+        for identifier in list(self._static_targets):
+            if identifier not in seen_ids:
+                self._static_targets.pop(identifier, None)
+                self._moving_confirm.pop(identifier, None)
+        if saw_target_conflict:
+            self._had_target_conflict = True
+            self._target_clear_count = 0
+        elif self._had_target_conflict:
+            if distinct:
+                self._target_clear_count += 1
+            if self._target_clear_count < settings.release_frames:
+                result.add("PROTECT", "target", -1,
+                           "TARGET_CLEAR:confirmation_pending",
+                           valid_until=perception.valid_until)
+            else:
+                self._had_target_conflict = False
+                self._target_clear_count = 0
+                self._static_targets.clear()
+                self._moving_confirm.clear()
+        return result
 
+    def _arbitrate(self, perception, output, distinct):
+        settings = self.settings
+        if not protocol.perception_usable(perception):
+            self._blind_stop = True
+            self._fault_state = "STOP_LATCHED"
+            self._recovery_count = 0
+            self._protect(output, float("inf"), "EGO_SOURCE:invalid_or_expired")
+            return
+        ego = perception.ego
         if not protocol.lane_usable(perception):
-            if ego_speed > settings.blind_speed_tolerance:
-                self._stop(output, "lane unavailable; no steerable reference", None, True)
-            else:
-                self._stop(output, "lane unavailable; holding at standstill")
+            self._protect(output, ego.speed, "LANE_SOURCE:unavailable")
             return
-
-        built = []
-        for target in perception.targets if targets_fresh else []:
-            candidate = candidate_rules.build_candidate(target, ego, perception)
-            if candidate is not None:
-                built.append(candidate)
-        lead = candidate_rules.select_lead(built)
-
-        if speed_policy.is_emergency(lead, ego_speed, settings):
-            self._stop(output, "obstacle emergency envelope", 0.0, True)
+        route = candidates.RouteContext(perception, settings)
+        if route.ego_s is None:
+            self._protect(output, ego.speed, "ROUTE_GEOMETRY:" + route.reason)
             return
-
-        if lead is not None:
-            if lead.clearance is None:
-                # The gap behind this target cannot be measured, so neither
-                # following nor a safe approach speed can be justified. Stop
-                # at the configured minimum gap and say the extent is missing.
-                self._stop(output, "same-lane obstacle with unpublished extent; "
-                                   "gap unmeasurable, stopping at the minimum gap",
-                           speed_policy.obstacle_stop_distance(lead, settings))
+        signed_speed = (math.cos(route.ego_heading) * ego.vx
+                        + math.sin(route.ego_heading) * ego.vy)
+        if signed_speed < -0.05:
+            self._protect(output, ego.speed, "EGO_MOTION:reverse_unsupported")
+            return
+        ego_speed = max(0.0, signed_speed)
+        targets_fresh = protocol.targets_usable(perception)
+        required = requires_targets(perception.scene_id)
+        if required and not targets_fresh:
+            if distinct:
+                self._blind_fault_count += 1
+            self._recovery_count = 0
+            self._static_targets.clear()
+            self._moving_confirm.clear()
+            self._fault_state = ("STOP_LATCHED" if self._blind_fault_count >= 2
+                                 else "FAULT_PENDING")
+            self._blind_stop = self._fault_state == "STOP_LATCHED"
+            self._protect(output, ego.speed, self._source_reason(perception)
+                          + ";state=" + self._fault_state)
+            return
+        self._blind_fault_count = 0
+        cruising = speed_policy.desired_speed(perception, settings)
+        constraints = self._collect(perception, route, ego_speed, cruising,
+                                    distinct)
+        emergency = constraints.first("EMERGENCY")
+        if emergency is not None:
+            self._protect(output, ego.speed, constraints.reason(emergency), True,
+                          force_emergency=True)
+            return
+        if self._blind_stop:
+            self._fault_state = "RECOVERING"
+            if ego.speed > settings.blind_speed_tolerance:
+                self._recovery_count = 0
+                self._protect(output, ego.speed, "TARGET_RECOVERY:vehicle_moving")
                 return
-            # Keep the delivered following policy, while enforcing the same
-            # cruise and published speed ceilings as clear-road driving.
-            self._follow(output, min(cruising, speed_policy.follow_speed(lead, ego, settings)),
-                         lead, ego_speed)
+            if distinct:
+                self._recovery_count += 1
+            if self._recovery_count < settings.recovery_frames:
+                self._protect(output, ego.speed,
+                              "TARGET_RECOVERY:good_frames={0}/{1}".format(
+                                  self._recovery_count, settings.recovery_frames))
+                return
+            self._blind_stop = False
+            self._recovery_count = 0
+        self._fault_state = "NORMAL"
+        protection = constraints.first("PROTECT")
+        if protection is not None:
+            self._protect(output, ego.speed, constraints.reason(protection))
             return
-
-        unverified = candidate_rules.unverified_close_targets(built, settings)
-        if unverified:
-            nearest = min(unverified, key=lambda item: item.clearance)
-            self._stop(output, "obstacle {0:.1f}m away is not map-verified as in-lane; "
-                               "lane membership unknown, stopping instead of guessing"
-                       .format(nearest.clearance))
+        if cruising <= 0.0:
+            self._protect(output, ego.speed, "SPEED_LIMIT:zero")
             return
-
-        self._cruise(output, cruising, perception)
-
-    # -- behaviour writers -----------------------------------------------
-
-    def _braking_required(self, ego_speed):
-        """Emergency braking is only meaningful when the vehicle is rolling.
-
-        At or near a standstill the same situation is a hold: requesting
-        emergency braking would assert a collision risk that does not exist
-        and would block a legitimate launch.
-        """
-        return ego_speed > self.settings.blind_speed_tolerance
-
-    def _cruise(self, output, speed, perception):
-        output.mode = DecisionMode.KEEP_LANE
+        stop = constraints.stop()
+        if stop is not None:
+            if (self._normal_state == "HOLD"
+                    and stop.distance <= settings.resume_margin):
+                self._clear_count = 0
+                self._protect(output, ego.speed,
+                              "HOLD_STOP:" + constraints.reason(stop), True)
+                return
+            if self._normal_state == "HOLD":
+                if distinct:
+                    self._clear_count += 1
+                if self._clear_count < settings.release_frames:
+                    self._protect(output, ego.speed,
+                                  "HOLD_RELEASE:clear_frames={0}/{1}".format(
+                                      self._clear_count, settings.release_frames), True)
+                    return
+            self._clear_count = 0
+            if (stop.distance <= settings.hold_distance
+                    and ego.speed <= settings.standstill_speed):
+                self._protect(output, ego.speed, constraints.reason(stop), True)
+                return
+            if speed_policy.stop_is_infeasible(stop.distance, ego.speed, settings):
+                self._protect(output, ego.speed,
+                              "STOP_INFEASIBLE:" + constraints.reason(stop), True)
+                return
+        elif self._normal_state == "HOLD":
+            if distinct:
+                self._clear_count += 1
+            if self._clear_count < settings.release_frames:
+                self._protect(output, ego.speed,
+                              "HOLD_RELEASE:clear_frames={0}/{1}".format(
+                                  self._clear_count, settings.release_frames), True)
+                return
+            self._clear_count = 0
+        else:
+            self._clear_count = 0
+        speed = constraints.speed()
+        if stop is not None:
+            speed = min(speed, speed_policy.approach_speed(
+                stop.distance, ego.speed, cruising, settings))
+            self._normal_state = "APPROACH_STOP"
+        elif constraints.follows():
+            self._normal_state = "FOLLOW"
+        else:
+            self._normal_state = "CRUISE"
+        output.mode = DecisionMode.FOLLOW if constraints.follows() else DecisionMode.KEEP_LANE
         output.target_speed = float(speed)
-        lane_id = perception.lane.lane_id
-        output.target_lane_id = lane_id if isinstance(lane_id, str) else ""
-        output.stop_distance = -1.0
-        limit = protocol.speed_limit(perception)
-        if limit is None:
-            output.reason = "keep lane at provisional cruise speed; no published speed limit"
+        output.target_lane_id = perception.lane.lane_id
+        output.stop_distance = -1.0 if stop is None else float(stop.distance)
+        primary = stop if stop is not None else constraints.first("FOLLOW")
+        if primary is None:
+            output.reason = "CRUISE:limit={0:.2f}".format(cruising)
         else:
-            output.reason = "keep lane at published speed limit"
-        output.valid = True
-
-    def _follow(self, output, speed, lead, ego_speed):
-        output.mode = DecisionMode.FOLLOW
-        output.target_speed = float(speed)
-        output.target_lane_id = lead.target.lane_id
-        output.stop_distance = -1.0
-        if lead.clearance is None:
-            gap = "gap unknown (target extent unpublished)"
-        else:
-            gap = "gap {0:.1f}m".format(lead.clearance)
-        if lead.target.ttc >= 0.0:
-            gap += ", ttc {0:.1f}s".format(lead.target.ttc)
-        else:
-            gap += ", ttc unavailable"
-        output.reason = "following same-lane lead (map-verified); {0}; " \
-                        "ego {1:.1f}m/s".format(gap, ego_speed)
-        output.valid = True
-
-    def _stop(self, output, reason, stop_distance=None, emergency=False):
-        """Command a stop, optionally at a known distance.
-
-        `stop_distance` stays -1 when the stopping point is unknown, matching
-        the public contract where a negative value means "not measured". A
-        zero would assert a measured stop point at the current position.
-        """
-        output.mode = DecisionMode.EMERGENCY_BRAKE if emergency else DecisionMode.STOP
-        output.target_speed = 0.0
-        output.stop_distance = -1.0 if stop_distance is None else float(stop_distance)
-        output.reason = reason
+            output.reason = constraints.reason(primary)
+        output.reason += ";state=" + self._normal_state
         output.valid = True

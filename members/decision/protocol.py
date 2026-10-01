@@ -47,8 +47,12 @@ def targets_usable(perception):
     if perception.targets_valid is not True or not isinstance(perception.targets, list):
         return False
     source = perception.target_source
+    statuses = getattr(perception, "source_status", {})
+    meta = statuses.get("targets", {}) if isinstance(statuses, dict) else {}
     return (isinstance(source, str) and source.startswith("sensor:")
-            and source_usable(perception, "targets"))
+            and source_usable(perception, "targets")
+            and isinstance(meta, dict)
+            and meta.get("sensor_read_ok") is not False)
 
 
 def lane_usable(perception):

@@ -1,16 +1,18 @@
-"""Offline lane-reference baseline. Python 3.6; no SDK or third-party packages.
+"""Offline forward lane planner. Python 3.6; no SDK or third-party packages.
 
-This is a forward, clear-road reference, not an obstacle-aware vehicle planner.
-Limits are provisional planning settings, not measured vehicle capabilities.
+Sensor targets constrain the path only when vehicle dimensions are supplied.
+Limits remain provisional planning settings, not measured vehicle capability.
 See BASELINE.md for the output contract and integration gates.
 """
 
 import math
+import os
 
 from core.geometry import normalize_angle, project_polyline
 from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory, TrajectoryPoint
 from core.validation import current, number, validate_output
 from core.scene_requirements import requires_targets
+from members.planning.obstacle_guard import obstacle_stop
 
 
 EPS = 1e-6
@@ -20,7 +22,10 @@ class PlannerSettings(object):
     def __init__(self, spacing=1.0, horizon=60.0, acceleration=1.0,
                  deceleration=2.0, lateral_acceleration=1.5,
                  max_lateral_error=0.5, max_heading_error=math.pi / 4,
-                 max_corner_angle=0.35, hold_time=0.1):
+                 max_corner_angle=0.35, hold_time=0.1,
+                 front_offset_m=None, half_width_m=None,
+                 obstacle_margin_m=4.0, lateral_margin_m=0.0,
+                 motion_tolerance_mps=0.0):
         self.spacing = spacing
         self.horizon = horizon
         self.acceleration = acceleration
@@ -30,10 +35,39 @@ class PlannerSettings(object):
         self.max_heading_error = max_heading_error
         self.max_corner_angle = max_corner_angle
         self.hold_time = hold_time
+        self.front_offset_m = front_offset_m
+        self.half_width_m = half_width_m
+        self.obstacle_margin_m = obstacle_margin_m
+        self.lateral_margin_m = lateral_margin_m
+        self.motion_tolerance_mps = motion_tolerance_mps
+
+    @classmethod
+    def from_environment(cls, environ=None):
+        environ = os.environ if environ is None else environ
+        values = {}
+        for name, field in (("NEVC_VEHICLE_FRONT_OFFSET_M", "front_offset_m"),
+                            ("NEVC_VEHICLE_HALF_WIDTH_M", "half_width_m"),
+                            ("NEVC_PLANNING_OBSTACLE_MARGIN_M", "obstacle_margin_m"),
+                            ("NEVC_PLANNING_LATERAL_MARGIN_M", "lateral_margin_m"),
+                            ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
+                            ("NEVC_PLANNING_DECELERATION_MPS2", "deceleration")):
+            if name in environ:
+                try:
+                    values[field] = float(environ[name])
+                except ValueError:
+                    raise ValueError("invalid planning override: " + name)
+        return cls(**values)
 
     def validate(self):
-        if not all(number(v) and v > EPS for v in vars(self).values()):
-            raise ValueError("planner settings must be finite and positive")
+        for name, value in vars(self).items():
+            if name in ("front_offset_m", "half_width_m") and value is None:
+                continue
+            if (not number(value) or value < 0.0 or
+                    (name not in ("lateral_margin_m", "motion_tolerance_mps")
+                     and value <= EPS)):
+                raise ValueError("planner setting {0} must be finite and positive".format(name))
+        if (self.front_offset_m is None) != (self.half_width_m is None):
+            raise ValueError("vehicle front offset and half-width must be configured together")
         if self.horizon / self.spacing > 1998:
             raise ValueError("requested sample budget exceeds 2000 points")
         if self.max_heading_error >= math.pi / 2 or self.max_corner_angle >= math.pi / 2:
@@ -209,8 +243,8 @@ def _hold(output, ego, emergency, reason, settings):
 
 def build_trajectory(perception, decision, settings=None):
     output = Trajectory()
-    settings = settings if settings is not None else PlannerSettings()
     try:
+        settings = settings if settings is not None else PlannerSettings.from_environment()
         settings.validate()
         if not isinstance(perception, Perception) or not isinstance(decision, DecisionTarget):
             raise ValueError("expected Perception and DecisionTarget")
@@ -249,7 +283,9 @@ def _moving_reference(output, perception, decision, settings):
             ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -EPS):
         raise ValueError("reverse trajectory unsupported")
     if decision.mode == DecisionMode.STOP and decision.stop_distance < 0:
-        raise ValueError("STOP requires nonnegative GPS-reference stop_distance")
+        _hold(output, ego, ego.speed > EPS,
+              "stop point unknown; hold or brake without inventing a path", settings)
+        return
     if decision.target_lane_id and decision.target_lane_id != lane.lane_id:
         raise ValueError("target lane geometry unavailable; lane change unsupported")
     if ego.speed <= EPS and (decision.mode == DecisionMode.STOP or decision.target_speed == 0):
@@ -264,24 +300,30 @@ def _moving_reference(output, perception, decision, settings):
                             and (perception.targets_valid is not True
                                  or perception.target_source == "ground_truth"
                                  or (isinstance(status, dict)
-                                     and status.get("sensor_presence") == "not_configured")))
+                                     and status.get("sensor_presence") == "not_configured"
+                                     and not perception.target_source.startswith("sensor:"))))
     if perception.targets_valid is not True and not optional_unavailable:
         raise ValueError("target observations unavailable; clear-road baseline requires valid observations")
-    if not isinstance(perception.targets, list) or (perception.targets and not optional_unavailable):
-        raise ValueError("obstacle-aware planning unavailable; baseline requires empty targets")
+    if not isinstance(perception.targets, list):
+        raise ValueError("target observations must be a list")
     reference, remaining, geometry = _reference_ahead(lane, ego, settings)
     if remaining <= EPS:
         output.stop_distance = 0.0
         _hold(output, ego, ego.speed > EPS, "end of known reference", settings)
         return
+    obstacle_limit = (obstacle_stop(perception, reference, settings)
+                      if perception.targets and not optional_unavailable else None)
     stop = remaining
     stopping = decision.mode == DecisionMode.STOP or decision.target_speed == 0
+    if obstacle_limit is not None:
+        stop = min(stop, obstacle_limit)
     if decision.stop_distance >= 0:
         stop = min(stop, decision.stop_distance)
     if decision.mode != DecisionMode.STOP and decision.target_speed == 0:
         stop = min(stop, ego.speed ** 2 / (2 * settings.deceleration))
     output.stop_distance = stop
-    output.stop_required = stopping or stop <= settings.horizon or decision.stop_distance >= 0
+    output.stop_required = (stopping or stop <= settings.horizon
+                            or decision.stop_distance >= 0 or obstacle_limit is not None)
     if stop <= EPS:
         _hold(output, ego, ego.speed > EPS, "immediate stop requested", settings)
         return
@@ -303,8 +345,13 @@ def _moving_reference(output, perception, decision, settings):
         output.points.append(TrajectoryPoint(x, y, speed, heading, elapsed))
     output.target_speed = 0.0 if stopping else decision.target_speed
     output.valid = True
-    output.reason = ("lane reference with optional target observations unavailable; collision clearance unverified"
-                     if optional_unavailable else
-                     "clear-road lane reference; vehicle footprint and tracking not validated")
+    if obstacle_limit is not None:
+        output.reason = "lane reference with conservative obstacle stop; moving target prediction unverified"
+    elif perception.targets and not optional_unavailable:
+        output.reason = "lane reference checked against current sensor target envelopes"
+    elif optional_unavailable:
+        output.reason = "lane reference with optional target observations unavailable; collision clearance unverified"
+    else:
+        output.reason = "clear-road lane reference; vehicle footprint and tracking not validated"
     if lane.forward_reference_valid is True:
         output.reason += "; forward reference: " + lane.forward_reference_status
