@@ -19,7 +19,7 @@ import os
 ENV_PREFIX = "NEVC_DECISION_"
 
 FIELDS = ("cruise_speed", "min_gap", "time_headway", "resume_margin",
-          "follow_deceleration", "emergency_clearance", "emergency_ttc", "launch_ttc_cap",
+          "follow_deceleration", "front_offset_m", "emergency_clearance", "emergency_ttc", "launch_ttc_cap",
           "stop_margin", "obstacle_stop_margin", "traffic_stop_margin",
           "blind_speed_tolerance")
 
@@ -56,7 +56,7 @@ def overrides_from_environment(environ=None):
 class DecisionSettings(object):
     def __init__(self, cruise_speed=30.0 / 3.6, min_gap=4.0, time_headway=1.2,
                  resume_margin=2.0, follow_deceleration=2.0,
-                 emergency_clearance=2.0, emergency_ttc=2.0,
+                 front_offset_m=None, emergency_clearance=2.0, emergency_ttc=2.0,
                  launch_ttc_cap=6.0, stop_margin=3.0,
                  obstacle_stop_margin=3.0, traffic_stop_margin=3.0,
                  blind_speed_tolerance=0.5):
@@ -72,6 +72,8 @@ class DecisionSettings(object):
         self.resume_margin = resume_margin
         # Provisional speed envelope for approaching a lead vehicle (m/s^2).
         self.follow_deceleration = follow_deceleration
+        # Rear-axle GPS to front bumper; unknown until measured for this car.
+        self.front_offset_m = front_offset_m
         # Below this clearance the lead vehicle counts as an emergency (m).
         self.emergency_clearance = emergency_clearance
         # Below this time-to-collision the lead vehicle counts as an
@@ -91,6 +93,8 @@ class DecisionSettings(object):
     def validate(self):
         for name in FIELDS:
             value = getattr(self, name)
+            if name == "front_offset_m" and value is None:
+                continue
             if not _number(value) or value < 0.0:
                 raise ValueError("decision setting {0} must be finite and nonnegative".format(name))
         if self.cruise_speed <= 0.0:
@@ -101,6 +105,8 @@ class DecisionSettings(object):
             raise ValueError("resume_margin must be positive")
         if self.time_headway <= 0.0 or self.follow_deceleration <= 0.0:
             raise ValueError("following time headway and deceleration must be positive")
+        if self.front_offset_m is not None and self.front_offset_m <= 0.0:
+            raise ValueError("measured front offset must be positive")
         return self
 
     def replace(self, **overrides):
@@ -115,6 +121,11 @@ class DecisionSettings(object):
     @classmethod
     def from_environment(cls, environ=None, **overrides):
         """Build settings from the environment, then apply explicit overrides."""
-        values = overrides_from_environment(environ)
+        environ = os.environ if environ is None else environ
+        values = {}
+        if "NEVC_VEHICLE_FRONT_OFFSET_M" in environ:
+            values["front_offset_m"] = _parse(
+                "NEVC_VEHICLE_FRONT_OFFSET_M", environ["NEVC_VEHICLE_FRONT_OFFSET_M"])
+        values.update(overrides_from_environment(environ))
         values.update(overrides)
         return cls().replace(**values)

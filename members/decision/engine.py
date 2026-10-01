@@ -144,11 +144,22 @@ class DecisionEngine(object):
 
         built = []
         for target in perception.targets if targets_fresh else []:
-            candidate = candidate_rules.build_candidate(target, ego, perception)
+            candidate = candidate_rules.build_candidate(
+                target, ego, perception, settings.front_offset_m or 0.0)
             if candidate is not None:
                 built.append(candidate)
         lead = candidate_rules.select_lead(built)
         unverified = candidate_rules.unverified_close_targets(built, settings)
+
+        # Missing extent cannot support a measured obstacle stop point.
+        if lead is not None and lead.clearance is None:
+            self._stop(output, "same-lane obstacle extent unknown; hold at current position",
+                       0.0, self._braking_required(ego_speed))
+            return
+        if unverified and any(item.clearance is None for item in unverified):
+            self._stop(output, "unverified obstacle extent unknown; hold at current position",
+                       0.0, self._braking_required(ego_speed))
+            return
 
         if speed_policy.is_emergency(lead, ego_speed, settings):
             self._stop(output, "obstacle emergency envelope", 0.0, True)
@@ -156,7 +167,8 @@ class DecisionEngine(object):
 
         traffic = perception.traffic
         if protocol.traffic_requires_stop(traffic):
-            distance = protocol.traffic_stop_distance(traffic, settings.traffic_stop_margin)
+            distance = protocol.traffic_stop_distance(
+                traffic, settings.traffic_stop_margin + (settings.front_offset_m or 0.0))
             if traffic.ambiguous:
                 reason = "signal group unresolved; stop until the applicable lamp is known"
             elif traffic.observed:
@@ -186,11 +198,6 @@ class DecisionEngine(object):
             return
 
         if lead is not None:
-            if lead.clearance is None:
-                self._stop(output, "same-lane obstacle with unpublished extent; "
-                                   "gap unmeasurable, stopping at the minimum gap",
-                           speed_policy.obstacle_stop_distance(lead, settings))
-                return
             self._follow(output, speed_policy.follow_speed(lead, ego, cruising, settings),
                          lead, ego_speed)
             return
@@ -199,8 +206,8 @@ class DecisionEngine(object):
             nearest = min(unverified, key=lambda item: item.clearance)
             self._stop(output, "obstacle {0:.1f}m away is not map-verified as in-lane; "
                                "lane membership unknown, stopping instead of guessing"
-                       .format(nearest.clearance),
-                       speed_policy.obstacle_stop_distance(nearest, settings))
+                       .format(nearest.clearance), 0.0,
+                       self._braking_required(ego_speed))
             return
 
         self._cruise(output, cruising, perception)
@@ -238,8 +245,8 @@ class DecisionEngine(object):
             gap = "gap unknown (target extent unpublished)"
         else:
             gap = "gap {0:.1f}m".format(lead.clearance)
-        if lead.target.ttc >= 0.0:
-            gap += ", ttc {0:.1f}s".format(lead.target.ttc)
+        if lead.ttc >= 0.0:
+            gap += ", ttc {0:.1f}s".format(lead.ttc)
         else:
             gap += ", ttc unavailable"
         output.reason = "following same-lane lead (map-verified); {0}; " \

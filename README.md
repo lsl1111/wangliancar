@@ -14,7 +14,7 @@
 - 额外读取任务路径点、传感器配置、环境，以及 SDK 可用时的 IMU、毫米波雷达、超声波与摄像头车道观测；这些数据在 `Perception` 中各自标明来源/有效性，不与目标真值混用。
 - 适配层对已核对的 SDK `3.0.0001` 旧 Python 绑定补齐路径点、目标检测与 Ground Truth 的布局，并修正交通灯字段偏移；兼容类型仅用于轮询，不修改 SDK 安装文件。未知版本的旧布局会在调用原生读接口之前报错。
 - 地图车道输出左右边界和标线；交通灯仅在当前车道关联到真实停止线时才输出有效灯色与沿车道的停车距离。
-- 决策、规划、控制保留固定入口；决策已接入主分支交付的 `DecisionEngine` 巡航、跟车、信号停车与紧急判断，并补当前数据链兼容。算法与 `StartCaptain.bat` 的默认巡航统一为 30 km/h（约 8.333 m/s），控制跟踪速度上限同步为 30 km/h；可信限速、弯道和停车约束可进一步降低速度。规划使用原始地图几何估算弯道限速，避免每帧重采样点距变化造成伪限速突降。控制接入前进挡 Pure Pursuit、PI 速度控制与停车保持；跟车规划、未知停车点消费和分叉路线选择仍待完善，不能将决策模式已实现视为整车能力已验收。启动方法见 [平台运行说明](scripts/PLATFORM_RUN.md)。
+- 决策、规划、控制保留固定入口；决策已接入主分支交付的 `DecisionEngine` 巡航、跟车、信号停车与紧急判断，并补当前数据链兼容。算法与 `StartCaptain.bat` 的默认巡航统一为 30 km/h（约 8.333 m/s），控制跟踪速度上限同步为 30 km/h；可信限速、弯道和停车约束可进一步降低速度。规划使用原始地图几何估算弯道限速，避免每帧重采样点距变化造成伪限速突降。控制接入前进挡 Pure Pursuit、PI 速度控制与停车保持；带目标的保守停车轨迹已加入，但必须提供经核实的车身前端距离和半宽；未知停车点可请求保持或制动。动态切入预测、分叉路线选择及真实闭环跟车仍待验收，不能将决策模式已实现视为整车能力已验收。启动方法见 [平台运行说明](scripts/PLATFORM_RUN.md)。
 - 默认 `send_control=false`，所以目前只观察、不抢车辆控制权。
 - GPS 的 `ego.gear` 是原始变速箱位置，与 `ControlOut.gear` 的 N/D/R/P 控制枚举不同。前进控制明确输出 Drive=1，保护制动使用 Neutral=0；不把反馈值 2 直接解释或发送成倒挡。感知保留原始值，反向运动由速度在车头方向的投影判断。
 - 运行层另有刹车安全监护：当前场景必需的目标流或车道失效、紧急停车、轨迹/GPS 失效或 GPS 帧停滞时生成零油门刹车候选，并在 `latest_pipeline.json` 记录原因。06 等车道场景没有目标传感器时不因此停车；01 等目标场景仍要求有效的 Sensor API 目标源。只有 `send_control` 和 `safety_brake_enabled` 同时显式开启才会尝试发送；两项默认均为 `false`，候选刹车比例尚待场景标定。
@@ -79,4 +79,4 @@ E:\Sim-One\Tools\python36\python.exe main.py --once
 - `route_points` 是二维案例任务路径提示，`route_waypoints` 另保留原始点序号和朝向四元数；两者都不是规划成员输出的 `Trajectory`。`traffic.stop_line_distance` 是沿当前车道中心线到真实停止线的距离，参考点为 GPS 位置；没有可靠停止线时交通字段保持无效。
 - 本机 Python 地图模块未提供可直接调用的车道限速接口，所以 `traffic.speed_limit=-1` 仍表示未知。图像、点云、V2X 原始流需要具体场景需求和独立处理链，不会自动进入当前结构化感知快照。
 - 41 场景的数据需求、必需 API 与现场验收步骤见 [场景数据验收清单](perception/SCENE_DATA_ACCEPTANCE.md)；只读采样命令为 `python scripts/accept_scene.py --scene 6 --frames 20 --timeout-sec 30`。报告的 `STRUCTURAL_PASS` 仅表示帧结构通过，事件仍需现场核对。
-- `DecisionTarget`、`Trajectory`、`ControlOut` 通过 `frame_id`、`timestamp`、`valid_until` 关联同一帧；`valid_until` 是本机单调时钟截止时间，不能跨进程持久化复用。当前车道规划输出前向参考轨迹及受加减速、弯道和地图末端约束的点速度与时间，见 [规划基线说明](members/planning/BASELINE.md)。控制试运行映射已通过离线测试但未完成整车响应与闭环验证。
+- `DecisionTarget`、`Trajectory`、`ControlOut` 通过 `frame_id`、`timestamp`、`valid_until` 关联同一帧；`valid_until` 是本机单调时钟截止时间，不能跨进程持久化复用。当前车道规划输出前向参考轨迹及受加减速、弯道和地图末端约束的点速度与时间，见 [规划基线说明](members/planning/BASELINE.md) 与 [带目标轨迹约束](members/planning/OBSTACLE_GUARD.md)。控制试运行映射已通过离线测试但未完成整车响应与闭环验证。

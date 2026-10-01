@@ -40,15 +40,16 @@ class Candidate(object):
         self.in_lane = in_lane
 
 
-def _clearance(target):
-    """Bumper-to-bumper gap along the lane, or None when the target extent is unknown."""
+def _clearance(target, front_offset):
+    """Forward gap from the GPS reference, minus any measured front offset."""
     length = target.length
     if type(length) not in (int, float) or not math.isfinite(length) or length <= 0.0:
         return None
-    return max(0.0, float(target.longitudinal_distance) - float(length) * 0.5)
+    return max(0.0, float(target.longitudinal_distance) - float(length) * 0.5
+               - float(front_offset))
 
 
-def build_candidate(target, ego, perception):
+def build_candidate(target, ego, perception, front_offset=0.0):
     """Return a Candidate, or None when the target is not valid evidence of an obstacle."""
     if target.valid is not True:
         return None
@@ -58,38 +59,35 @@ def build_candidate(target, ego, perception):
     # A target behind or beside the reference point cannot be a lead vehicle.
     if target.longitudinal_distance <= 0.0:
         return None
-    ttc, _ = calculate_ttc(target.longitudinal_distance, ego.speed,
+    clearance = _clearance(target, front_offset)
+    # TTC uses the same front-to-target gap as the distance rule when known.
+    ttc_distance = clearance if clearance is not None else target.longitudinal_distance
+    ttc, _ = calculate_ttc(ttc_distance, ego.speed,
                            target.vx, target.vy, ego.heading)
-    return Candidate(target, _clearance(target), ttc, target_in_lane(target, perception))
+    return Candidate(target, clearance, ttc, target_in_lane(target, perception))
 
 
 def select_lead(candidates):
-    """Nearest in-lane candidate ahead, or None."""
-    in_lane = []
-    for candidate in candidates:
-        if not candidate.in_lane:
-            continue
-        in_lane.append(candidate)
+    """Most constraining in-lane target, with unknown extent first."""
+    in_lane = [candidate for candidate in candidates if candidate.in_lane]
     if not in_lane:
         return None
-    return min(in_lane, key=lambda item: item.target.longitudinal_distance)
+    return min(in_lane, key=lambda item: (0, item.target.longitudinal_distance)
+               if item.clearance is None else (1, item.clearance))
 
 
 def unverified_close_targets(candidates, settings):
-    """Off-lane targets that are too close to ignore.
+    """Unverified near targets, plus any unverified target of unknown extent.
 
-    These cannot be resolved into drive-or-stop by this member: steering
-    around them is a planning decision, and the road is not proven clear.
-    The caller treats them as a stop and states the limitation.
+    Verified adjacent-lane objects are excluded. An unknown physical extent
+    cannot support a measured clearance, so it must not be silently ignored.
     """
     close = []
     for candidate in candidates:
         if candidate.in_lane or candidate.target.same_lane_valid is True:
             # A verified adjacent-lane vehicle is not an unknown obstacle.
             continue
-        if candidate.clearance is None:
-            continue
-        if candidate.clearance <= settings.min_gap:
+        if candidate.clearance is None or candidate.clearance <= settings.min_gap:
             close.append(candidate)
     return close
 

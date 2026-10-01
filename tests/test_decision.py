@@ -348,13 +348,65 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(0.0, near_speed)
         self.assertLessEqual(middle_speed, (2.0 * 2.0 * (18.0 - 4.0)) ** 0.5)
 
+    def test_consecutive_frames_reduce_speed_as_stationary_gap_closes(self):
+        settings = DecisionSettings(cruise_speed=8.0, front_offset_m=3.5)
+        engine = DecisionEngine(settings)
+        speeds = []
+        for frame, distance in enumerate((30.0, 25.0, 20.0, 15.0, 10.0)):
+            p = perception(speed=0.0, frame_id=frame)
+            add_target(p, longitudinal=distance, speed=0.0)
+            result = engine.run(p)
+            self.assertEqual(DecisionMode.FOLLOW, result.mode)
+            speeds.append(result.target_speed)
+        self.assertGreater(speeds[0], 0.0)
+        self.assertEqual(0.0, speeds[-1])
+        self.assertEqual(sorted(speeds, reverse=True), speeds)
+
     def test_obstacle_without_extent_stops_without_guessing_clearance(self):
         p = perception(speed=0.0)
         add_target(p, longitudinal=30.0, speed=0.0, length=0.0)
         result = self.run_engine(p, DecisionSettings(min_gap=4.0))
         self.assertEqual(DecisionMode.STOP, result.mode)
-        self.assertEqual(4.0, result.stop_distance)
+        self.assertEqual(0.0, result.stop_distance)
         self.assertIn("same-lane", result.reason)
+
+    def test_unknown_extent_never_invents_a_remote_stop_point(self):
+        p = perception(speed=3.0)
+        add_target(p, longitudinal=30.0, length=0.0)
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, result.mode)
+        self.assertEqual(0.0, result.stop_distance)
+
+        p = perception(speed=0.0)
+        add_target(p, longitudinal=2.0, length=0.0,
+                   same_lane_valid=False, lane_id="")
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.STOP, result.mode)
+        self.assertEqual(0.0, result.stop_distance)
+
+    def test_measured_front_offset_reduces_gap_and_ttc(self):
+        p = perception(speed=6.0)
+        add_target(p, longitudinal=16.0, speed=0.0, length=4.0)
+        no_offset = self.run_engine(p, DecisionSettings())
+        with_offset = self.run_engine(p, DecisionSettings(front_offset_m=3.0))
+        self.assertEqual(DecisionMode.FOLLOW, no_offset.mode)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, with_offset.mode)
+
+    def test_lead_selection_uses_clearance_and_never_hides_unknown_extent(self):
+        p = perception(speed=0.0)
+        small = add_target(p, longitudinal=10.0, length=2.0)
+        small.id = 1
+        long = add_target(p, longitudinal=12.0, length=10.0)
+        long.id = 2
+        result = self.run_engine(p)
+        self.assertEqual(DecisionMode.FOLLOW, result.mode)
+        self.assertIn("gap 7.0m", result.reason)
+
+        unknown = add_target(p, longitudinal=30.0, length=0.0)
+        unknown.id = 3
+        held = self.run_engine(p)
+        self.assertEqual(DecisionMode.STOP, held.mode)
+        self.assertEqual(0.0, held.stop_distance)
 
     def test_target_behind_the_reference_point_is_not_a_lead(self):
         p = perception(speed=3.0)
@@ -494,6 +546,14 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(1.5, settings.time_headway)
         # Untouched parameters keep their built-in values.
         self.assertEqual(4.0, settings.min_gap)
+
+    def test_shared_vehicle_front_offset_environment_is_used(self):
+        settings = DecisionSettings.from_environment(
+            environ={"NEVC_VEHICLE_FRONT_OFFSET_M": "3.5"})
+        self.assertEqual(3.5, settings.front_offset_m)
+        with self.assertRaises(ValueError):
+            DecisionSettings.from_environment(
+                environ={"NEVC_VEHICLE_FRONT_OFFSET_M": "0"})
 
     def test_explicit_override_beats_the_environment(self):
         settings = DecisionSettings.from_environment(

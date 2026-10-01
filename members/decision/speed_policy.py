@@ -83,11 +83,11 @@ def obstacle_stop_distance(candidate, settings):
 
     `decision.stop_distance` is read by the planner as a distance from the
     GPS reference point along the lane, so the margin is subtracted here.
-    When extent or offset is unknown a fixed gap is used and the caller says
-    so in the reason text, rather than driving on an unmeasured clearance.
+    Unknown extent has no measurable stop point and returns None; the caller
+    must request a current-position hold or emergency brake instead.
     """
     if candidate.clearance is None:
-        return max(0.0, float(settings.min_gap))
+        return None
     return max(0.0, candidate.clearance - settings.obstacle_stop_margin)
 
 
