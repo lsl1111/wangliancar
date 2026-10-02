@@ -13,6 +13,7 @@ from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory
 from core.validation import current, number, validate_output
 from core.scene_requirements import requires_targets
 from members.planning.obstacle_guard import obstacle_stop
+from members.planning.speed_constraints import upcoming_limits, speed_caps
 
 
 EPS = 1e-6
@@ -25,7 +26,7 @@ class PlannerSettings(object):
                  max_corner_angle=0.35, hold_time=0.1,
                  front_offset_m=None, half_width_m=None,
                  obstacle_margin_m=4.0, lateral_margin_m=0.0,
-                 motion_tolerance_mps=0.0):
+                 motion_tolerance_mps=0.0, lateral_guard_time_s=3.0):
         self.spacing = spacing
         self.horizon = horizon
         self.acceleration = acceleration
@@ -40,6 +41,7 @@ class PlannerSettings(object):
         self.obstacle_margin_m = obstacle_margin_m
         self.lateral_margin_m = lateral_margin_m
         self.motion_tolerance_mps = motion_tolerance_mps
+        self.lateral_guard_time_s = lateral_guard_time_s
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -50,6 +52,7 @@ class PlannerSettings(object):
                             ("NEVC_PLANNING_OBSTACLE_MARGIN_M", "obstacle_margin_m"),
                             ("NEVC_PLANNING_LATERAL_MARGIN_M", "lateral_margin_m"),
                             ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
+                            ("NEVC_PLANNING_LATERAL_GUARD_TIME_S", "lateral_guard_time_s"),
                             ("NEVC_PLANNING_DECELERATION_MPS2", "deceleration")):
             if name in environ:
                 try:
@@ -132,13 +135,14 @@ def _reference_ahead(lane, ego, settings):
     return list(zip(distances, path)), distances[-1], geometry
 
 
-def _sample(reference, horizon, spacing):
+def _sample(reference, horizon, spacing, anchors=()):
     # A global distance grid avoids restarting spacing at each map segment.
     # Keep original vertices too: otherwise sampling can cut across a corner.
     positions = [0.0, horizon]
     positions.extend(i * spacing for i in range(1, int(horizon / spacing) + 1)
                      if i * spacing < horizon - EPS)
     positions.extend(s for s, _ in reference if EPS < s < horizon - EPS)
+    positions.extend(s for s in anchors if EPS < s < horizon - EPS)
     if len(positions) == 2:
         positions.append(horizon * 0.5)  # Allows accelerate-then-stop on a short path.
     positions.sort()
@@ -210,13 +214,16 @@ def _curve_limits(samples, settings, geometry=None):
     return unwrapped, limits
 
 
-def _speed_profile(samples, curve_limits, initial, desired, stop, settings):
+def _speed_profile(samples, curve_limits, initial, desired, stop, settings,
+                   external_limits=None):
     caps = []
-    for (s, _), curve in zip(samples, curve_limits):
+    external_limits = (external_limits if external_limits is not None
+                       else [float("inf")] * len(samples))
+    for (s, _), curve, external in zip(samples, curve_limits, external_limits):
         # When overspeeding, request bounded braking instead of jumping to target.
         demand = max(desired, math.sqrt(max(0.0, initial ** 2 - 2 * settings.deceleration * s)))
         stop_cap = math.sqrt(max(0.0, 2 * settings.deceleration * (stop - s)))
-        caps.append(min(demand, stop_cap, curve))
+        caps.append(min(demand, stop_cap, curve, external))
     for i in range(len(caps) - 2, -1, -1):
         ds = samples[i + 1][0] - samples[i][0]
         caps[i] = min(caps[i], math.sqrt(caps[i + 1] ** 2 + 2 * settings.deceleration * ds))
@@ -293,8 +300,7 @@ def _moving_reference(output, perception, decision, settings):
         return
     if lane.valid is not True:
         raise ValueError("map lane unavailable")
-    # Vehicle footprint and obstacle prediction contracts have not been supplied.
-    # Fail explicitly instead of claiming an unchecked moving path is collision-free.
+    # Keep source and geometry gates before applying any motion envelope.
     status = perception.source_status.get("targets", {})
     optional_unavailable = (not requires_targets(perception.scene_id)
                             and (perception.targets_valid is not True
@@ -327,13 +333,18 @@ def _moving_reference(output, perception, decision, settings):
     if stop <= EPS:
         _hold(output, ego, ego.speed > EPS, "immediate stop requested", settings)
         return
+    limits = upcoming_limits(perception, settings)
     horizon = min(settings.horizon, stop)
-    samples = _sample(reference, horizon, settings.spacing)
+    samples = _sample(reference, horizon, settings.spacing,
+                      anchors=[distance for distance, _ in limits])
     headings, curve_limits = _curve_limits(samples, settings, geometry)
     desired = ego.speed if decision.mode == DecisionMode.STOP else decision.target_speed
-    speeds = _speed_profile(samples, curve_limits, ego.speed, desired, stop, settings)
+    speeds = _speed_profile(samples, curve_limits, ego.speed, desired, stop, settings,
+                            speed_caps(samples, limits, settings.deceleration))
     if speeds is None:
-        _hold(output, ego, True, "braking or curve constraint infeasible; controller must brake", settings)
+        _hold(output, ego, True,
+              "braking, curve or speed-limit constraint infeasible; controller must brake",
+              settings)
         return
     elapsed = 0.0
     for i, ((s, (x, y)), heading, speed) in enumerate(zip(samples, headings, speeds)):
@@ -355,3 +366,5 @@ def _moving_reference(output, perception, decision, settings):
         output.reason = "clear-road lane reference; vehicle footprint and tracking not validated"
     if lane.forward_reference_valid is True:
         output.reason += "; forward reference: " + lane.forward_reference_status
+    if limits:
+        output.reason += "; upcoming speed limits applied: {0}".format(len(limits))

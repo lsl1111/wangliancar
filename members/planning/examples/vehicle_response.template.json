@@ -1,0 +1,48 @@
+{
+  "data_kind": "unfilled_measurement_template",
+  "requirement_ids": ["R02", "R03"],
+  "interface_status": "proposed_measurement_columns_not_runtime_protocol",
+  "units": {"time": "s", "position": "m", "speed": "m/s", "acceleration": "m/s^2", "angle": "rad", "pedal_and_command_steering": "normalized"},
+  "experiment": {
+    "vehicle_instance_manifest": null,
+    "initial_speed_mps": null,
+    "road_grade_rad": null,
+    "load_or_surface_conditions": null,
+    "measured_sample_rate_hz": null,
+    "steering_feedback_reference": null,
+    "raw_gear_feedback_mapping_verified": null,
+    "authorization_and_run_evidence": null
+  },
+  "samples": [{
+    "command_input_frame_id": null,
+    "command_relative_time_s": null,
+    "send_receipt_relative_time_s": null,
+    "send_api_success": null,
+    "throttle_command": null,
+    "brake_command": null,
+    "steering_command": null,
+    "gear_command_ndrp": null,
+    "feedback_frame_id": null,
+    "feedback_sdk_timestamp": null,
+    "feedback_relative_time_s": null,
+    "speed_mps": null,
+    "body_acceleration_mps2": null,
+    "body_heading_rad": null,
+    "rear_axle_position_world_m": null,
+    "throttle_feedback": null,
+    "brake_feedback": null,
+    "steering_feedback_raw": null,
+    "gps_gear_raw": null
+  }],
+  "measurements": {
+    "command_to_observed_response_delay_s": null,
+    "usable_deceleration_range_mps2": null,
+    "usable_acceleration_range_mps2": null,
+    "steering_to_front_wheel_angle_or_curvature": null,
+    "distance_from_brake_request_to_standstill_m": null,
+    "standstill_front_position_world_m": null,
+    "distance_reference_and_method": null,
+    "conditions_and_uncertainty": null,
+    "evidence_location": null
+  }
+}

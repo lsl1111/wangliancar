@@ -1,0 +1,102 @@
+{
+  "data_kind": "synthetic_authored_protocol_proposal",
+  "interface_status": "not_implemented_requires_captain_and_members_agreement",
+  "requirement_ids": ["R05", "R06", "R07", "R08", "R09"],
+  "source_is_runtime_observation": false,
+  "coordinates": "fictional_world_metres_body_yaw_radians_rear_axle_goal",
+  "execution_feedback_proposal": {
+    "producer": "planning",
+    "consumer": "decision_via_agreed_runtime_contract",
+    "intent_id": "demo_park_001",
+    "stage": "REVERSE_ENTRY",
+    "source_frame_id": 101,
+    "source_timestamp": 1000,
+    "produced_relative_time_s": 1.0,
+    "validity_semantics": "to_be_agreed_not_cross_process_deadline",
+    "status": "REJECTED",
+    "reason_code": "FREE_SPACE_COVERAGE_UNVERIFIED",
+    "requested_fallback": "brake_or_hold_via_existing_safety_contract",
+    "actual_standstill_confirmed": false,
+    "retryable": null,
+    "recovery_authority": "decision"
+  },
+  "neighbor_and_route_geometry_proposal": {
+    "source": "synthetic_authored_not_hdmap_read",
+    "reference_point_for_route_s": "demo_route_start_0_3.5",
+    "candidate_lanes": [{
+      "lane_id": "demo_lane_left",
+      "travel_direction": "positive_x",
+      "center_line": [[0.0, 3.5], [50.0, 3.5]],
+      "left_boundary": [[0.0, 5.25], [50.0, 5.25]],
+      "right_boundary": [[0.0, 1.75], [50.0, 1.75]],
+      "width_m": 3.5,
+      "shared_boundary_marking": "DASHED",
+      "shared_boundary_crossing_allowed": true,
+      "query_coverage_route_s_m": [0.0, 50.0],
+      "successor_lane_ids": ["demo_lane_left_next"]
+    }],
+    "route_segments": [{
+      "lane_id": "demo_lane_left",
+      "start_s_m": 0.0,
+      "end_s_m": 50.0,
+      "center_line": [[0.0, 3.5], [50.0, 3.5]]
+    }, {
+      "lane_id": "demo_lane_left_next",
+      "start_s_m": 50.0,
+      "end_s_m": 80.0,
+      "center_line": [[50.0, 3.5], [80.0, 3.5]]
+    }],
+    "selected_branch_by_decision": "demo_lane_left_next",
+    "current_route_progress_s_m": 0.0,
+    "full_road_network_coverage": false
+  },
+  "maneuver_goal_proposal": {
+    "producer": "decision",
+    "consumer": "planning",
+    "intent_id": "demo_park_001",
+    "maneuver": "PARK",
+    "stage": "REVERSE_ENTRY",
+    "parking_space_id": 7001,
+    "target_lane_id": null,
+    "goal_pose": {"x": 3.0, "y": -2.5, "body_heading_rad": 0.0, "reference_point": "ego_rear_axle"},
+    "motion_direction": -1,
+    "speed_cap_mps": 1.0,
+    "precision_stop": true,
+    "minimum_standstill_duration_s": 10.0,
+    "parking_brake_at_stop": true,
+    "exit_condition": "wait_for_explicit_next_decision_stage_after_dwell",
+    "light_intent": {"left_signal": false, "right_signal": false, "hazard_signal": false},
+    "geometry_and_observation_gate_satisfied": false
+  },
+  "free_space_observation_request": {
+    "expected_producer": "captain_perception",
+    "expected_source": "verified_sensor_observations_plus_static_map",
+    "parking_space_id": 7001,
+    "occupancy": "unknown",
+    "observation_frame_id": null,
+    "observation_age_ms": null,
+    "verified_free_polygon_world_m": null,
+    "obstacle_footprints_world_m": null,
+    "rear_sensor_id": null,
+    "rear_coverage_polygon_world_m": null,
+    "rear_coverage_verified": false,
+    "usable": false,
+    "reason": "not_supplied_map_parking_geometry_does_not_prove_free_space"
+  },
+  "intersection_observation_request": {
+    "expected_producer": "captain_perception",
+    "map_version": null,
+    "query_scope": "to_be_verified",
+    "coverage_complete": false,
+    "unassociated_stop_lines": null,
+    "unassociated_crosswalks": null,
+    "ground_markings": null,
+    "conflict_polygons_world_m": null,
+    "exit_occupancy": "unknown",
+    "dynamic_object_source": null,
+    "observation_frame_id": null,
+    "observation_age_ms": null,
+    "usable": false,
+    "reason": "official_binding_and_observation_coverage_require_verification"
+  }
+}
