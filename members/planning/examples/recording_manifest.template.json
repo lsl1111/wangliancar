@@ -1,0 +1,89 @@
+{
+  "data_kind": "unfilled_delivery_template",
+  "requirement_ids": ["R01", "R02", "R03", "R04"],
+  "recording_kind": null,
+  "code_commit": null,
+  "case_id": null,
+  "task_id": null,
+  "sdk_version": null,
+  "recorded_at": null,
+  "sdk_timestamp_unit_verified": null,
+  "source_to_relative_time_mapping": null,
+  "observed_frame_rate_hz": null,
+  "vehicle_instance": {
+    "resource_id": null,
+    "resource_version": null,
+    "task_mode": null,
+    "current_instance_evidence": null,
+    "preset_binding_confirmed": false,
+    "gps_reference_confirmed": null,
+    "front_offset_m_confirmed": null,
+    "rear_offset_m_confirmed": null,
+    "half_width_m_confirmed": null,
+    "wheelbase_m_confirmed": null
+  },
+  "already_supplied_preset_candidate": {
+    "source": "TaskServer/dist/client/nevc.js::NEVC_DYNAMICS_PARAMS",
+    "applies_when": "AssetClient.getVehicle_local_task_mode_not_yet_bound_to_current_case",
+    "front_offset_m": 3.9187,
+    "rear_offset_m": 0.88,
+    "half_width_m": 0.9,
+    "wheelbase_m": 2.9187
+  },
+  "target_sensor": {
+    "actual_id": null,
+    "type": null,
+    "published_task_config_evidence": null,
+    "configured_or_callback_verified": null,
+    "range_m": null,
+    "heading_rad": null,
+    "field_of_view_rad": null,
+    "rate_hz": null,
+    "target_position_reference": null,
+    "speed_noise_measurement": null
+  },
+  "scoring": {
+    "active_rules_version": null,
+    "judge_version_or_configuration": null,
+    "rules_source": null,
+    "follow_distance_definition": null,
+    "aeb_distance_definition": null,
+    "red_stop_distance_definition": null,
+    "speed_limit_reference_point": null,
+    "parking_pose_and_dwell_definition": null,
+    "actual_score": null,
+    "result_evidence": null
+  },
+  "files": {
+    "frames_jsonl_location": null,
+    "events_json_location": null,
+    "vehicle_response_location": null,
+    "score_report_location": null,
+    "checksums_location": null
+  },
+  "event_annotation_template": {
+    "event_id": null,
+    "event_kind": null,
+    "start_relative_time_s": null,
+    "end_relative_time_s": null,
+    "target_or_map_object_ids": null,
+    "expected_behavior": null,
+    "observed_result": null,
+    "outcome_source": null,
+    "score": null
+  },
+  "reference_data": {
+    "kind": null,
+    "source": null,
+    "permitted_use": null,
+    "position_reference": null,
+    "time_alignment": null,
+    "coverage": null,
+    "production_sensor_input_kept_separate": true
+  },
+  "runtime_switches_observed": {
+    "send_control": null,
+    "safety_brake_enabled": null
+  },
+  "private_raw_data_not_committed": true
+}

@@ -3,6 +3,8 @@
 Only forward, approximately path-aligned traffic is supported. A moving
 object is treated as if it could stop at its current position; that is a
 conservative bound for a forward lead, not a prediction of its future path.
+Small lateral motion needs verified current-lane geometry and an expanded
+envelope; it is not silently discarded as sensor noise.
 Vehicle dimensions must be supplied explicitly before a moving trajectory
 with targets can be marked valid.
 """
@@ -14,6 +16,38 @@ from core.validation import number
 
 
 EPS = 1e-9
+
+
+def _lateral_drift(perception, target, projection, velocity, settings):
+    """Bound constant lateral drift within a verified current-lane corridor.
+
+    This local assumption does not model a future lane change or acceleration.
+    Require at least the trial observation window and current braking time.
+    The full drift expands the obstacle envelope even when motion falls under
+    an explicitly configured tolerance.
+    """
+    if abs(velocity) <= EPS:
+        return 0.0
+    window = max(settings.lateral_guard_time_s,
+                 perception.ego.speed / settings.deceleration)
+    drift = abs(velocity) * window
+    if not number(drift):
+        raise ValueError("nonfinite obstacle lateral drift")
+    if abs(velocity) <= settings.motion_tolerance_mps:
+        return drift
+    lane = perception.lane
+    if (target.same_lane_valid is not True or target.lane_id != lane.lane_id
+            or lane.lane_width_valid is not True or not number(lane.lane_width)
+            or lane.lane_width <= 0 or not number(target.heading)
+            or not 0.0 <= projection["raw_ratio"] <= 1.0):
+        raise ValueError("crossing or oncoming obstacle motion unsupported")
+    angle = target.heading - projection["heading"]
+    lateral_extent = 0.5 * (target.length * abs(math.sin(angle))
+                            + target.width * abs(math.cos(angle)))
+    clearance = lane.lane_width * 0.5 - lateral_extent - settings.lateral_margin_m
+    if clearance <= 0 or projection["distance"] + drift > clearance:
+        raise ValueError("crossing or oncoming obstacle motion unsupported")
+    return drift
 
 
 def _entry_distance(reference, x, y, radius):
@@ -76,10 +110,11 @@ def obstacle_stop(perception, reference, settings):
         lateral_velocity = (-math.sin(heading) * target.vx
                             + math.cos(heading) * target.vy)
         if (projection["s"] + envelope >= 0.0
-                and projection["s"] <= reference[-1][0] + envelope
-                and (longitudinal_velocity < -settings.motion_tolerance_mps
-                     or abs(lateral_velocity) > settings.motion_tolerance_mps)):
-            raise ValueError("crossing or oncoming obstacle motion unsupported")
+                and projection["s"] <= reference[-1][0] + envelope):
+            if longitudinal_velocity < -settings.motion_tolerance_mps:
+                raise ValueError("crossing or oncoming obstacle motion unsupported")
+            envelope += _lateral_drift(perception, target, projection,
+                                       lateral_velocity, settings)
         entry = _entry_distance(reference, target.x, target.y, envelope)
         if entry is None:
             continue
