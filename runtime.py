@@ -9,12 +9,14 @@ from core.serialization import perception_to_dict, to_dict
 from core.validation import validate_output
 from core.interfaces import DecisionTarget, Trajectory, ControlOut
 from core.safety_supervisor import SafetySupervisor
+from core.scene_requirements import requires_targets
 from members.control_stub import compute_control, configure_control
 from members.decision_stub import decide, decision_info, reset_decision
 from members.planning_stub import plan
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, ROUTE_REFERENCE_VERSION
 from simone_platform.simone_adapter import SimOneAdapter
+from simone_platform.sensor_catalog import TARGET_INGESTION_VERSION
 
 
 def _member_output(value, expected, source):
@@ -23,6 +25,31 @@ def _member_output(value, expected, source):
     if isinstance(value, expected) and value.valid is False:
         return value.bind(source)
     return validate_output(value, expected, source)
+
+
+def target_input_summary(perception):
+    """Report formal target state separately from diagnostic object count."""
+    statuses = getattr(perception, "source_status", {})
+    meta = statuses.get("targets", {}) if isinstance(statuses, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    source = getattr(perception, "target_source", "none")
+    usable = (perception.targets_valid is True and isinstance(source, str)
+              and source.startswith("sensor:") and meta.get("usable") is True
+              and meta.get("sensor_read_ok", True) is not False)
+    count = len(perception.targets)
+    return {"required": requires_targets(getattr(perception, "scene_id", 0)),
+            "state": ("valid_objects" if count else "valid_empty") if usable else "unavailable",
+            "usable": usable, "source": source, "object_count": count,
+            "diagnostic_only": source == "ground_truth",
+            "frame_id": perception.targets_frame_id,
+            "sensor_presence": meta.get("sensor_presence", "unknown"),
+            "sensor_id": meta.get("sensor_id", ""),
+            "sensor_read_ok": meta.get("sensor_read_ok", False),
+            "quality": meta.get("quality", "unknown"),
+            "reason": meta.get("reason", "unknown"),
+            "transport": meta.get("transport", "none"),
+            "id_verified": meta.get("id_verified", False),
+            "candidates": list(meta.get("sensor_candidates", []))}
 
 
 class CaptainRuntime(object):
@@ -42,6 +69,8 @@ class CaptainRuntime(object):
         reset_decision()
         self.runtime_info = decision_info()
         self.runtime_info.update({"pid": os.getpid(),
+                                  "project_dir": os.path.dirname(os.path.abspath(__file__)),
+                                  "target_ingestion_version": TARGET_INGESTION_VERSION,
                                   "route_reference_version": ROUTE_REFERENCE_VERSION,
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
@@ -181,14 +210,24 @@ class CaptainRuntime(object):
                                        safety)
             processed += 1
             if processed == 1 or processed % 100 == 0:
+                target_status = perception.source_status.get("targets", {})
+                targets_usable = (perception.targets_valid
+                                  and isinstance(perception.target_source, str)
+                                  and perception.target_source.startswith("sensor:")
+                                  and target_status.get("usable", False))
                 self.logger.info(
-                    "frame=%s valid=%s lane=%s targets=%s speed=%.2fm/s decision=%s trajectory=%s control=%s send=%s reason=%s",
+                    "frame=%s valid=%s lane=%s targets=%s target_source=%s targets_usable=%s "
+                    "target_reason=%s speed=%.2fm/s decision=%s mode=%s decision_reason=%s "
+                    "trajectory=%s control=%s send=%s reason=%s",
                     perception.frame_id,
                     perception.valid,
                     perception.lane.lane_id,
                     len(perception.targets),
+                    perception.target_source, targets_usable,
+                    target_status.get("reason", "unknown"),
                     perception.ego.speed,
-                    decision.valid, trajectory.valid, control.valid, receipt["reason"],
+                    decision.valid, decision.mode, decision.reason,
+                    trajectory.valid, control.valid, receipt["reason"],
                     trajectory.reason if not trajectory.valid else "; ".join(control.errors),
                 )
             if once:
@@ -215,11 +254,18 @@ class CaptainRuntime(object):
         return self._publish_json(self.pipeline_path, {
             "runtime": dict(self.runtime_info),
             "perception_frame_id": perception.frame_id,
+            "target_input": target_input_summary(perception),
             "route_reference": {
                 "valid": perception.lane.forward_reference_valid,
                 "lane_ids": list(perception.lane.forward_lane_ids),
                 "status": perception.lane.forward_reference_status,
                 "point_count": len(perception.lane.forward_reference)},
+            "map_observations": {
+                "parking_count": len(perception.parking_spaces),
+                "stop_line_count": len(perception.map_stop_lines),
+                "crosswalk_count": len(perception.map_crosswalks),
+                "speed_limits": to_dict(perception.speed_limit_observations),
+                "status": to_dict(perception.map_observation_status)},
             "decision": to_dict(decision), "trajectory": to_dict(trajectory),
             "control": to_dict(control), "safety": {
                 "mode": safety.mode, "reason": safety.reason,

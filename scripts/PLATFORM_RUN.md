@@ -9,6 +9,8 @@
 
 `StartCaptain.bat` 启动项目的 `main.py`，依次执行感知、决策、规划、控制并由运行层发送。因此不需要把决策或控制模块的 Python 文件单独填入平台。已有控制器路径相同，就无需重新填写；下一次启动会读取磁盘上的更新代码。已经运行的队长进程需要先结束，才会加载新代码。
 
+若平台控制器使用本机 main 工作目录，路径分别为 `F:\wangliancar\nevc_auto_main\scripts\StartCaptain.bat` 与 `F:\wangliancar\nevc_auto_main\scripts\KillCaptain.bat`，日志也在该目录的 `runtime_data` 中。两个工作目录各自加载自己的代码；其他分支已修复不代表 main 脚本已更新。核对 `latest_pipeline.json.runtime.project_dir` 和 `target_ingestion_version=sensor-discovery-v2` 可确认实际加载目录和目标接入版本。
+
 ## 实跑步骤
 
 1. 结束上一轮仿真，确认控制器的结束脚本执行。必要时手动运行 `KillCaptain.bat`。同一项目同时启动第二个进程会被单实例锁拒绝。
@@ -33,3 +35,5 @@ Get-Content F:\wangliancar\nevc_auto\runtime_data\captain.log -Tail 50 -Wait
 ```
 
 案例结束后检查同一次运行的日志。离线测试通过不等于平台通过；当前已补唯一后继车道接续，下一轮重点检查进入弯道时前方参考包含后继车道，交界处不再进入 HOLD。`map_end` 表示整条已查明参考最终有终点，并不表示车道交界需要立即停车；应结合 `trajectory.stop_distance/stop_required` 和点速度判断。分叉未选择或连接异常的原因与边界见 [路线接续说明](../perception/ROUTE_CONTINUATION.md)。
+
+跟车等任务原地不动时，先看 `latest_pipeline.json.target_input`。`valid_empty` 是正式源的有效空帧，允许正常任务判断；`unavailable` 是没有可信正式帧，即使诊断真值中有对象也不能当成道路为空。`safety.reason=required_targets_unavailable` 对应输入保护，优先核对实际 ID、配置查询/回调、读取原因和时效。必要时只读运行 `python scripts/audit_task_sensors.py --platform-root E:\Sim-One --snapshot runtime_data/latest_perception.json`，确认保存后的任务主车、脚本与传感器清单，再与实时 API 帧比较；详见 [目标接入说明](../perception/TARGET_DATA_INGESTION.md)。

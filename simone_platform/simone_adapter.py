@@ -6,10 +6,14 @@ import ctypes
 import math
 import os
 import sys
+import threading
 import time
 
 from core.interfaces import ControlOut
 from simone_platform.sdk_compat import polling_structs
+from simone_platform.sensor_catalog import (TARGET_INGESTION_VERSION, sensor_kind,
+                                           target_sensor_ids)
+from simone_platform.map_observations import MapObservationReader
 
 
 def _decode_sdk_text(value):
@@ -55,6 +59,16 @@ def _native_dict(value):
     return value
 
 
+def _finite_sensor_data(value):
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite_sensor_data(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite_sensor_data(item) for item in value)
+    return True
+
+
 class SimOneAdapter(object):
     CASE_STOP = 1
     CASE_RUNNING = 2
@@ -78,8 +92,18 @@ class SimOneAdapter(object):
                                     "sensor_configurations_valid": False,
                                     "environment": {}, "environment_valid": False}
         self._reference_update = 0.0
+        self._map_observations = None
         self._traffic_candidates = {}
         self._last_frame_times = {}
+        self.sdk_version = ""
+        self._target_callback = None
+        self._target_callback_status = "not_registered"
+        self._target_streams = {}
+        self._target_lock = threading.Lock()
+        self._target_accepting = True
+        self._target_probe_after = {}
+        self._target_log_signature = None
+        self._target_log_time = 0.0
 
     def bootstrap(self):
         sdk_dir = os.path.abspath(self.config.sdk_dir)
@@ -97,6 +121,7 @@ class SimOneAdapter(object):
         self.service_api = importlib.import_module("SimOneServiceAPI")
         self.hdmap = importlib.import_module("HDMapAPI")
         version = self.service_api.SoAPIGetVersion()
+        self.sdk_version = _decode_sdk_text(version)
         self.structs, repairs = polling_structs(self.structs, version)
         if repairs:
             self.logger.warning("已修正 SDK %s 轮询结构布局: %s",
@@ -114,7 +139,9 @@ class SimOneAdapter(object):
             )
             if result:
                 self.connected = True
+                self._target_accepting = True
                 self.pnc_api.SoSetDriverName(self.config.vehicle_id, "Captain")
+                self._register_target_callback()
                 self.logger.info(
                     "已连接 SimOne: vehicle=%s server=%s",
                     self.config.vehicle_id,
@@ -129,6 +156,8 @@ class SimOneAdapter(object):
             raise RuntimeError("SDK 尚未加载")
         self.map_loaded = bool(self.hdmap.loadHDMap(int(self.config.map_timeout_sec)))
         self._traffic_candidates = {}
+        self._map_observations = None
+        self._reference_update = 0.0
         if not self.map_loaded:
             self.logger.warning("高精地图加载失败；GPS/目标数据仍可继续输出")
         else:
@@ -205,30 +234,9 @@ class SimOneAdapter(object):
         self._metadata("gps", gps, True)
         errors = []
         reference = self._read_reference_data()
-        configurations = reference["sensor_configurations"]
-        preferred_id = self.config.sensor_id
-        if reference["sensor_configurations_valid"]:
-            ids = [item.get("id", "") for item in configurations if isinstance(item, dict)]
-            if preferred_id in ids:
-                target_sensor_id = preferred_id
-            else:
-                candidates = [item.get("id", "") for item in configurations
-                              if isinstance(item, dict) and item.get("id") and
-                              any(word in item.get("type", "").lower() for word in
-                                  ("camera", "lidar", "fusion", "perfect"))]
-                target_sensor_id = candidates[0] if candidates else ""
-            sensor_presence = "configured" if target_sensor_id else "not_configured"
-        else:
-            target_sensor_id = preferred_id
-            sensor_presence = "unknown"
-        target_frame, target_timestamp = -1, 0
-        targets, source = None, "none"
-        if target_sensor_id:
-            try:
-                targets, source, target_frame, target_timestamp = self._read_sensor_targets(
-                    target_sensor_id)
-            except Exception as exc:
-                errors.append("SENSOR_TARGETS_INVALID:{0}".format(type(exc).__name__))
+        targets, source, target_frame, target_timestamp, target_status, target_errors = (
+            self._read_target_sources(reference, int(gps.frame)))
+        errors.extend(target_errors)
         if targets is None:
             try:
                 targets, target_frame, target_timestamp = self._read_ground_truth_targets()
@@ -245,14 +253,159 @@ class SimOneAdapter(object):
                   "errors": errors}
         result.update(reference)
         result.update(self._read_auxiliary_data(result["sensor_configurations"]))
-        self._source_status["targets"] = {
+        target_status.update({
             "read_ok": targets is not None, "source": source,
-            "sensor_presence": sensor_presence,
-            "sensor_id": target_sensor_id,
             "sensor_read_ok": source.startswith("sensor:"),
             "frame_id": result["targets_frame"], "timestamp": result["targets_timestamp"],
-            "age_ms": result["targets_age_ms"], "clock": "sdk_frame"}
+            "age_ms": result["targets_age_ms"], "clock": "sdk_frame"})
+        self._source_status["targets"] = target_status
+        self._log_target_status(target_status)
         return result
+
+    def _register_target_callback(self):
+        """Discover actual source IDs with the verified detection ABI.
+
+        The vendor Python callback typedef uses the old 128-byte entry stride.
+        Register our own typed callback against the native void-returning API,
+        retaining it until termination. No SDK installation files are changed.
+        """
+        native = getattr(self.sensor_api, "SimoneAPI", None)
+        if native is None or self.sdk_version != "3.0.0001":
+            self._target_callback_status = "unsupported"
+            return
+        try:
+            kind = self.structs.SimOne_Data_SensorDetections
+            if ctypes.sizeof(kind) != 58388:
+                raise ValueError("unverified callback detection ABI")
+            callback_type = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_char_p,
+                                             ctypes.POINTER(kind))
+            self._target_callback = callback_type(self._receive_target_detection)
+            register = native.SetSensorDetectionsUpdateCB
+            register.restype = ctypes.c_bool
+            register.argtypes = [callback_type]
+            ok = register(self._target_callback)
+            self._target_callback_status = "registered" if ok else "registration_failed"
+        except Exception as exc:
+            self._target_callback_status = "unavailable:" + type(exc).__name__
+        log = getattr(self.logger, "info", None)
+        if callable(log):
+            log("目标接入 version=%s callback=%s", TARGET_INGESTION_VERSION,
+                self._target_callback_status)
+
+    def _receive_target_detection(self, vehicle_id, sensor_id, pointer):
+        """Detach native memory on the SDK thread; never run member algorithms here."""
+        if _decode_sdk_text(vehicle_id) != self.config.vehicle_id or not pointer:
+            return
+        identifier = _decode_sdk_text(sensor_id)
+        if not identifier or len(identifier.encode("utf-8")) >= 64:
+            return
+        now = time.monotonic()
+        try:
+            # Reinterpret vendor-typed pointers only with our already-verified layout.
+            native = ctypes.cast(pointer, ctypes.POINTER(
+                self.structs.SimOne_Data_SensorDetections)).contents
+            targets, frame, timestamp = self._parse_sensor_targets(native)
+            record = {"targets": targets, "frame_id": frame, "timestamp": timestamp,
+                      "received_at": now, "reason": "ok"}
+        except Exception as exc:
+            record = {"targets": None, "frame_id": -1, "timestamp": 0,
+                      "received_at": now, "reason": "invalid:" + type(exc).__name__}
+        with self._target_lock:
+            if self._target_accepting and (identifier in self._target_streams
+                                           or len(self._target_streams) < 100):
+                self._target_streams[identifier] = record
+
+    def _read_target_sources(self, reference, gps_frame):
+        """Select a fresh official sensor stream, with bounded fallback probing."""
+        now = time.monotonic()
+        config_ok = reference["sensor_configurations_valid"]
+        configured = target_sensor_ids(reference["sensor_configurations"], self.config.sensor_id)
+        with self._target_lock:
+            streams = dict(self._target_streams)  # callback records are replaced, never mutated
+        timeout = getattr(self.config, "sensor_timeout_ms", 500)
+        # A previously delivered ID remains a real discovery even when that
+        # packet expires. Poll that ID for recovery, never reuse its old objects.
+        observed = sorted(streams)
+        candidates = configured + [identifier for identifier in observed if identifier not in configured]
+        preferred = self.config.sensor_id
+        # An unknown catalog is not proof of absent sensors. Probe only the user
+        # preference; other IDs must come from configurations or actual callbacks.
+        if not config_ok and preferred and not candidates:
+            candidates.append(preferred)
+        if preferred in candidates:
+            candidates.remove(preferred)
+            candidates.insert(0, preferred)
+        presence = "configured" if configured else ("unknown" if observed or not config_ok
+                                                    else "not_configured")
+        meta = {"version": TARGET_INGESTION_VERSION, "sensor_presence": presence,
+                "sensor_id": candidates[0] if candidates else "", "sensor_candidates": candidates,
+                "config_read_ok": config_ok,
+                "config_reason": reference.get("sensor_configurations_reason", "unknown"),
+                "callback_status": self._target_callback_status,
+                "callback_sensor_ids": observed, "attempts": [], "transport": "none",
+                "callback_errors": {identifier: record["reason"]
+                                    for identifier, record in streams.items()
+                                    if record["targets"] is None},
+                "id_verified": False,
+                "reason": "not_configured" if presence == "not_configured" else "sensor_read_failed"}
+        errors = []
+        for identifier in candidates:
+            record = streams.get(identifier)
+            transport = "callback"
+            if (record is None or record["targets"] is None
+                    or (now - record["received_at"]) * 1000 >= timeout):
+                if now < self._target_probe_after.get(identifier, 0.0):
+                    meta["attempts"].append({"sensor_id": identifier,
+                                             "read_ok": False, "reason": "retry_backoff"})
+                    continue
+                transport = "poll"
+                try:
+                    targets, unused_source, frame, timestamp = self._read_sensor_targets(identifier)
+                    record = {"targets": targets, "frame_id": frame, "timestamp": timestamp}
+                except Exception as exc:
+                    record = {"targets": None, "frame_id": -1, "timestamp": 0}
+                    errors.append("SENSOR_TARGETS_INVALID:{0}:{1}".format(identifier, type(exc).__name__))
+            reason = "read_failed"
+            age = -1
+            if record["targets"] is not None:
+                age = self._frame_age_ms("targets:sensor:" + identifier, record["frame_id"])
+                reason = ("regressed" if age == -2 else "stale" if age >= timeout else
+                          "unsynchronized" if abs(record["frame_id"] - gps_frame) >
+                          getattr(self.config, "max_sensor_frame_gap", 10) else "ok")
+            attempt = {"sensor_id": identifier, "read_ok": record["targets"] is not None,
+                       "reason": reason, "transport": transport,
+                       "frame_id": record["frame_id"], "age_ms": age}
+            meta["attempts"].append(attempt)
+            if reason != "ok":
+                self._target_probe_after[identifier] = now + 1.0
+                continue
+            meta.update(sensor_id=identifier, reason="empty" if not record["targets"] else "ok",
+                        sensor_presence="configured" if identifier in configured else "unknown",
+                        transport=transport, id_verified=identifier in configured or identifier in observed)
+            self._target_probe_after.pop(identifier, None)
+            return (copy.deepcopy(record["targets"]), "sensor:" + identifier,
+                    record["frame_id"], record["timestamp"], meta, errors)
+        if candidates:
+            errors.append("SENSOR_TARGETS_UNAVAILABLE:" + ",".join(candidates))
+        return None, "none", -1, 0, meta, errors
+
+    def _log_target_status(self, meta):
+        # Log state transitions and a ten-second reminder, never every failed poll.
+        signature = tuple(meta.get(key) for key in
+                          ("config_read_ok", "config_reason", "sensor_presence", "sensor_id",
+                           "source", "sensor_read_ok", "reason", "transport"))
+        now = time.monotonic()
+        if signature == self._target_log_signature and now - self._target_log_time < 10.0:
+            return
+        self._target_log_signature, self._target_log_time = signature, now
+        log = getattr(self.logger, "info", None)
+        if callable(log):
+            log("目标接入 config=%s config_reason=%s presence=%s candidates=%s selected=%s "
+                "source=%s sensor_ok=%s transport=%s reason=%s attempts=%s callback_errors=%s",
+                meta["config_read_ok"], meta["config_reason"], meta["sensor_presence"],
+                ",".join(meta["sensor_candidates"]), meta["sensor_id"], meta["source"],
+                meta["sensor_read_ok"], meta["transport"], meta["reason"], meta["attempts"],
+                meta["callback_errors"])
 
     def _frame_age_ms(self, source, frame):
         if frame < 0:
@@ -281,13 +434,25 @@ class SimOneAdapter(object):
         )
         if not ok:
             return None, "none", -1, 0
+        targets, frame, timestamp = self._parse_sensor_targets(data)
+        return targets, "sensor:{0}".format(sensor_id), frame, timestamp
+
+    def _parse_sensor_targets(self, data):
         targets = []
         if int(data.objectSize) < 0 or int(data.objectSize) > len(data.objects):
             raise ValueError("sensor object count out of range")
         for index in range(int(data.objectSize)):
             item = data.objects[index]
-            targets.append(self._target_dict(item, float(item.probability)))
-        return targets, "sensor:{0}".format(sensor_id), int(data.frame), int(data.timestamp)
+            target = self._target_dict(item, float(item.probability))
+            if not _finite_sensor_data(target):
+                raise ValueError("nonfinite sensor target")
+            if not 0.0 <= target["probability"] <= 1.0:
+                raise ValueError("invalid sensor target probability")
+            targets.append(target)
+        frame, timestamp = int(data.frame), int(data.timestamp)
+        if frame < 0 or timestamp < 0:
+            raise ValueError("invalid sensor frame header")
+        return targets, frame, timestamp
 
     def _read_ground_truth_targets(self):
         data = self.structs.SimOne_Data_Obstacle()
@@ -343,10 +508,13 @@ class SimOneAdapter(object):
     def _read_reference_data(self):
         """Scenario metadata changes rarely; avoid polling it at 20 Hz."""
         now = time.monotonic()
-        if self._reference_update and now - self._reference_update < 5.0:
+        ready = (self._reference_snapshot["sensor_configurations_valid"]
+                 and bool(self._reference_snapshot["sensor_configurations"]))
+        if self._reference_update and now - self._reference_update < (5.0 if ready else 0.5):
             return copy.deepcopy(self._reference_snapshot)
         snapshot = {"route_points": [], "route_waypoints": [], "route_valid": False,
                     "sensor_configurations": [], "sensor_configurations_valid": False,
+                    "sensor_configurations_reason": "api_missing",
                     "environment": {},
                     "environment_valid": False, "traffic_signs": [],
                     "traffic_signs_valid": False, "reference_errors": []}
@@ -378,6 +546,7 @@ class SimOneAdapter(object):
             snapshot["reference_errors"].append("ROUTE_UNAVAILABLE:{0}".format(type(exc).__name__))
         try:
             if hasattr(self.sensor_api, "SoGetSensorConfigurations"):
+                snapshot["sensor_configurations_reason"] = "read_failed"
                 configurations = self.structs.SimOne_Data_SensorConfigurations()
                 if self.sensor_api.SoGetSensorConfigurations(self.config.vehicle_id, configurations):
                     count = int(configurations.dataSize)
@@ -398,8 +567,10 @@ class SimOneAdapter(object):
                     ]
                     snapshot["sensor_configurations"] = values
                     snapshot["sensor_configurations_valid"] = True
+                    snapshot["sensor_configurations_reason"] = "ok" if values else "empty"
         except Exception as exc:
             snapshot["reference_errors"].append("SENSOR_CONFIG_UNAVAILABLE:{0}".format(type(exc).__name__))
+            snapshot["sensor_configurations_reason"] = "invalid:" + type(exc).__name__
         try:
             if hasattr(self.sensor_api, "SoGetEnvironment"):
                 environment = self.structs.SimOne_Data_Environment()
@@ -408,37 +579,25 @@ class SimOneAdapter(object):
                     snapshot["environment_valid"] = True
         except Exception as exc:
             snapshot["reference_errors"].append("ENVIRONMENT_UNAVAILABLE:{0}".format(type(exc).__name__))
-        try:
-            if self.map_loaded and self.hdmap is not None and hasattr(self.hdmap, "getTrafficSignList"):
-                signs = self.hdmap.getTrafficSignList()
-                count = int(signs.Size())
-                if count < 0 or count > 10000:
-                    raise ValueError("traffic sign count out of range")
-                for i in range(count):
-                    sign = signs.GetElement(i)
-                    validities = getattr(sign, "validities", None)
-                    scopes = []
-                    for j in range(validities.Size() if validities else 0):
-                        scope = validities.GetElement(j)
-                        scopes.append({"road_id": int(scope.roadId),
-                                       "section_index": int(scope.sectionIndex),
-                                       "from_lane_id": int(scope.fromLaneId),
-                                       "to_lane_id": int(scope.toLaneId)})
-                    snapshot["traffic_signs"].append({
-                        "id": int(sign.id), "type": _map_string(sign.type),
-                        "sub_type": _map_string(sign.subType),
-                        "value": _map_string(sign.value), "unit": _map_string(sign.unit),
-                        "is_dynamic": bool(sign.isDynamic),
-                        "heading": float(sign.heading),
-                        "x": float(sign.pt.x), "y": float(sign.pt.y),
-                        "z": float(sign.pt.z), "validities": scopes})
-                snapshot["traffic_signs_valid"] = True
-        except Exception as exc:
-            snapshot["traffic_signs"] = []
-            snapshot["reference_errors"].append("TRAFFIC_SIGNS_UNAVAILABLE:{0}".format(type(exc).__name__))
+        if self.map_loaded and self.hdmap is not None:
+            snapshot.update(self._map_reader().catalog())
+            for name, meta in snapshot["map_observation_status"].items():
+                if meta["reason"] in ("read_failed", "invalid_records"):
+                    snapshot["reference_errors"].append(name.upper() + "_UNAVAILABLE:" + meta["reason"])
         self._reference_snapshot = snapshot
         self._reference_update = now
         return copy.deepcopy(snapshot)
+
+    def _map_reader(self):
+        if self._map_observations is None or self._map_observations.hdmap is not self.hdmap:
+            self._map_observations = MapObservationReader(self.hdmap)
+        return self._map_observations
+
+    def read_map_observations(self, lane_ids):
+        """Static lane-associated objects, independent of dynamic light colour."""
+        if not self.map_loaded or self.hdmap is None:
+            return {}
+        return self._map_reader().lane_objects(lane_ids)
 
     def _read_auxiliary_data(self, configurations):
         result = {"imu": {}, "imu_valid": False, "radar_detections": [],
@@ -470,10 +629,10 @@ class SimOneAdapter(object):
                 result["sensor_errors"].append("IMU_UNAVAILABLE:{0}".format(type(exc).__name__))
         for sensor in configurations:
             sensor_id = sensor.get("id", "")
-            kind = sensor.get("type", "").lower()
+            kind = sensor_kind(sensor.get("type", ""))
             if not sensor_id:
                 continue
-            if (("radar" in kind and "ultrasonic" not in kind) or kind == "3") and hasattr(self.sensor_api, "SoGetRadarDetections"):
+            if kind == "radar" and hasattr(self.sensor_api, "SoGetRadarDetections"):
                 try:
                     radar = self.structs.SimOne_Data_RadarDetection()
                     radar_ok = self.sensor_api.SoGetRadarDetections(self.config.vehicle_id, sensor_id, radar)
@@ -514,7 +673,7 @@ class SimOneAdapter(object):
                         if hit["sensor_id"] != sensor_id
                     ]
                     result["sensor_errors"].append("RADAR_UNAVAILABLE:{0}:{1}".format(sensor_id, type(exc).__name__))
-            if ("camera" in kind or "fusion" in kind or kind in ("1", "9")) and hasattr(self.sensor_api, "SoGetSensorLaneInfo"):
+            if kind in ("camera", "fusion") and hasattr(self.sensor_api, "SoGetSensorLaneInfo"):
                 try:
                     lane = self.structs.SimOne_Data_LaneInfo()
                     lane_ok = self.sensor_api.SoGetSensorLaneInfo(self.config.vehicle_id, sensor_id, lane)
@@ -703,11 +862,18 @@ class SimOneAdapter(object):
         return self.pnc_api.SoSetSignalLights(self.config.vehicle_id, lights)
 
     def shutdown(self):
+        with self._target_lock:
+            self._target_accepting = False
         if self.connected and self.service_api is not None:
             try:
                 self.service_api.SoTerminateSimOneAPI()
             finally:
                 self.connected = False
+                with self._target_lock:
+                    self._target_streams.clear()
+                self._target_probe_after.clear()
+                self._last_frame_times.clear()
+                self._reference_update = 0.0
 
     @staticmethod
     def gps_speed(gps):

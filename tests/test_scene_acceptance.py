@@ -1,9 +1,13 @@
 """Acceptance checks distinguish clean data from missing or substituted sources."""
 
 import copy
+import json
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.accept_scene import analyze_frames
+from scripts.accept_scene import analyze_frames, collect
 
 
 def frame(number):
@@ -68,6 +72,43 @@ class SceneAcceptanceTests(unittest.TestCase):
         report = analyze_frames([first, second], 6, 2)
         self.assertEqual("FAIL_OR_INCOMPLETE", report["status"])
         self.assertTrue(any("strictly increasing" in failure for failure in report["failures"]))
+
+    def test_real_callback_id_can_be_verified_when_catalog_is_unavailable(self):
+        values = [frame(1), frame(2)]
+        for value in values:
+            value["scene_id"] = 1
+            value["sensor_configurations_valid"] = False
+            value["sensor_configurations"] = []
+            value["source_status"]["targets"].update(
+                id_verified=True, sensor_read_ok=True,
+                callback_sensor_ids=["perfectPerception1"])
+        report = analyze_frames(values, 1, 2)
+        self.assertEqual("STRUCTURAL_PASS", report["status"])
+        self.assertEqual(0, report["counts"]["sensor_config_ok"])
+        self.assertEqual(2, report["counts"]["target_id_verified"])
+        self.assertTrue(any("configuration query remains unavailable" in warning
+                            for warning in report["warnings"]))
+        values[1]["source_status"]["targets"]["usable"] = False
+        self.assertEqual("FAIL_OR_INCOMPLETE", analyze_frames(values, 1, 2)["status"])
+
+    def test_default_id_probe_alone_is_not_sensor_id_verification(self):
+        value = frame(1)
+        value["scene_id"] = 1
+        value["sensor_configurations_valid"] = False
+        value["sensor_configurations"] = []
+        value["source_status"]["targets"].update(id_verified=False, sensor_read_ok=True)
+        self.assertEqual("FAIL_OR_INCOMPLETE", analyze_frames([value], 1, 1)["status"])
+
+    def test_live_capture_skips_a_previous_run_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "latest_perception.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(frame(1), stream)
+            with patch("scripts.accept_scene.time.time", return_value=100.0), \
+                    patch("scripts.accept_scene.os.path.getmtime", return_value=99.0), \
+                    patch("scripts.accept_scene.time.monotonic", side_effect=[0.0, 0.0, 2.0]), \
+                    patch("scripts.accept_scene.time.sleep"):
+                self.assertEqual([], collect(path, 1, 1.0))
 
 
 if __name__ == "__main__":
