@@ -30,7 +30,8 @@ def _summaries(value, path=""):
             records.append({
                 "json_path": path or "/", "main_vehicle_id": value.get("mainVehicleId")
                     if type(value.get("mainVehicleId")) in (int, str) else None,
-                "main_vehicle_name": _text(custom.get("name")),
+                # customization describes the controller, not the vehicle preset.
+                "controller_name": _text(custom.get("name")),
                 "start_script": _text(custom.get("startScriptPath")),
                 "end_script": _text(custom.get("endScriptPath")),
                 "sensor_list_valid": isinstance(sensors, list),
