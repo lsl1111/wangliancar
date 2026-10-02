@@ -232,6 +232,12 @@ class CaptainRuntime(object):
                 "lane_ids": list(perception.lane.forward_lane_ids),
                 "status": perception.lane.forward_reference_status,
                 "point_count": len(perception.lane.forward_reference)},
+            "map_observations": {
+                "parking_count": len(perception.parking_spaces),
+                "stop_line_count": len(perception.map_stop_lines),
+                "crosswalk_count": len(perception.map_crosswalks),
+                "speed_limits": to_dict(perception.speed_limit_observations),
+                "status": to_dict(perception.map_observation_status)},
             "decision": to_dict(decision), "trajectory": to_dict(trajectory),
             "control": to_dict(control), "safety": {
                 "mode": safety.mode, "reason": safety.reason,

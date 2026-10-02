@@ -172,6 +172,16 @@ class Perception(object):
         self.traffic = TrafficControl()
         self.traffic_signs = []
         self.traffic_signs_valid = False
+        # Detached static HDMap observations in world metres. These are not
+        # synchronized Sensor API frames, occupancy or planned trajectories.
+        self.parking_spaces = []
+        self.parking_spaces_valid = False
+        self.map_stop_lines = []
+        self.map_stop_lines_valid = False
+        self.map_crosswalks = []
+        self.map_crosswalks_valid = False
+        self.map_observation_status = {}
+        self.speed_limit_observations = []
         # Scenario waypoints are route hints, not a planned trajectory.
         self.route_points = []
         self.route_waypoints = []

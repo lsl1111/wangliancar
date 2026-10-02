@@ -8,6 +8,7 @@ from core.geometry import calculate_ttc, speed_2d, world_to_ego, project_polylin
 from core.interfaces import EgoState, Perception, Target, TrafficControl
 from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
+from perception.map_semantics import speed_limit_observations
 
 
 # ESimOne_TrafficLight_Status values returned by SoGetTrafficLights.
@@ -95,6 +96,7 @@ class PerceptionBuilder(object):
         # Keep auxiliary observations available even when GPS is unavailable.
         for name, empty in (("route_points", []), ("route_waypoints", []),
                             ("traffic_signs", []),
+                            ("parking_spaces", []),
                             ("sensor_configurations", []), ("environment", {}), ("imu", {})):
             value = raw.get(name, copy.deepcopy(empty))
             flag = "route_valid" if name.startswith("route_") else name + "_valid"
@@ -158,6 +160,7 @@ class PerceptionBuilder(object):
                 result.errors.append("LANE_UNAVAILABLE:" + type(exc).__name__)
         if not result.lane.valid:
             result.errors.append("LANE_UNAVAILABLE")
+        self._build_map_observations(result, raw)
         lane_half_width = max(1.4, result.lane.lane_width * 0.5)
         target_data = raw.get("targets", [])
         if not isinstance(target_data, list):
@@ -235,6 +238,46 @@ class PerceptionBuilder(object):
             result.valid_until = min(result.valid_until, time.monotonic() +
                                      max(0, timeout - result.ego.age_ms) / 1000.0)
         return result
+
+    def _build_map_observations(self, result, raw):
+        statuses = raw.get("map_observation_status", {})
+        result.map_observation_status = copy.deepcopy(statuses) if isinstance(statuses, dict) else {}
+        if not all(isinstance(v, dict) and _finite_data(v)
+                   for v in result.map_observation_status.values()):
+            result.map_observation_status = {}
+            result.errors.append("MAP_OBSERVATION_STATUS_INVALID")
+        if not all(isinstance(v, dict) and _finite_data(v)
+                   for v in result.parking_spaces):
+            result.parking_spaces, result.parking_spaces_valid = [], False
+            result.errors.append("PARKING_SPACES_INVALID")
+        context = {}
+        if hasattr(self.adapter, "read_map_observations"):
+            try:
+                lane_ids = ([result.lane.lane_id] if result.lane.valid else [])
+                context = self.adapter.read_map_observations(lane_ids)
+            except Exception as exc:
+                result.errors.append("MAP_OBSERVATIONS_UNAVAILABLE:" + type(exc).__name__)
+        if not isinstance(context, dict):
+            context = {}
+        extra_statuses = context.get("map_observation_status", {})
+        if (isinstance(extra_statuses, dict) and all(isinstance(v, dict) and _finite_data(v)
+                                                   for v in extra_statuses.values())):
+            result.map_observation_status.update(copy.deepcopy(extra_statuses))
+        for name in ("map_stop_lines", "map_crosswalks"):
+            values = context.get(name, [])
+            good = isinstance(values, list) and all(isinstance(v, dict) and _finite_data(v)
+                                                     for v in values)
+            setattr(result, name, copy.deepcopy(values) if good else [])
+            setattr(result, name + "_valid", good and context.get(name + "_valid") is True)
+            if not good:
+                result.errors.append(name.upper() + "_INVALID")
+        observations, limit, source = speed_limit_observations(
+            result.traffic_signs, result.traffic_signs_valid, result.ego, result.lane)
+        result.speed_limit_observations = observations
+        if limit > 0:
+            existing = result.lane.speed_limit
+            if existing <= 0 or limit < existing:
+                result.lane.speed_limit, result.lane.speed_limit_source = limit, source
 
     def _build_traffic(self, ego, lane, errors):
         traffic = TrafficControl()

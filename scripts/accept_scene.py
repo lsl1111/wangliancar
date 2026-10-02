@@ -76,7 +76,9 @@ def analyze_frames(frames, scene_id, minimum=20):
     failures, warnings = [], []
     counts = {"gps_ok": 0, "targets_ok": 0, "lane_ok": 0,
               "sensor_config_ok": 0, "target_id_verified": 0, "target_frames_with_objects": 0,
-              "traffic_frames": 0, "sign_frames": 0, "route_frames": 0}
+              "traffic_frames": 0, "sign_frames": 0, "route_frames": 0,
+              "parking_frames": 0, "stop_line_frames": 0,
+              "crosswalk_frames": 0, "speed_limit_frames": 0}
     seen_ids, seen_cases, seen_sources = set(), set(), set()
     last_frame = None
     for index, item in enumerate(frames):
@@ -149,6 +151,27 @@ def analyze_frames(frames, scene_id, minimum=20):
             counts["sign_frames"] += 1
         if item.get("route_valid") is True and item.get("route_points"):
             counts["route_frames"] += 1
+        for key, minimum_points, counter in (("parking_spaces", 4, "parking_frames"),
+                ("map_stop_lines", 2, "stop_line_frames"),
+                ("map_crosswalks", 3, "crosswalk_frames")):
+            records = item.get(key)
+            if item.get(key + "_valid") is True and isinstance(records, list) and any(
+                    isinstance(record, dict) and record.get("valid") is True
+                    and record.get("source") == "hdmap"
+                    and isinstance(record.get("boundary_knots"), list)
+                    and len(record["boundary_knots"]) >= minimum_points
+                    and all(isinstance(point, (list, tuple)) and len(point) == 3
+                            and all(_finite(value) for value in point)
+                            for point in record["boundary_knots"])
+                    and (key == "parking_spaces" or lane.get("lane_id") in record.get("lane_ids", []))
+                    for record in records):
+                counts[counter] += 1
+        speed_observations = item.get("speed_limit_observations", [])
+        if isinstance(speed_observations, list) and any(isinstance(value, dict)
+                and value.get("source") == "hdmap" and value.get("applicable") is True
+                and _finite(value.get("speed_mps")) and value["speed_mps"] > 0
+                for value in speed_observations):
+            counts["speed_limit_frames"] += 1
     total = len(frames)
     if total < minimum:
         failures.append("only {0}/{1} distinct frames captured".format(total, minimum))
@@ -157,7 +180,7 @@ def analyze_frames(frames, scene_id, minimum=20):
     if target_required and counts["targets_ok"] != total:
         failures.append("configured sensor targets usable in {0}/{1} frames".format(
             counts["targets_ok"], total))
-    if counts["lane_ok"] != total:
+    if capability != "parking" and counts["lane_ok"] != total:
         failures.append("HD-map lane usable in {0}/{1} frames".format(counts["lane_ok"], total))
     if target_required and total and counts["target_id_verified"] == 0:
         failures.append("target sensor ID was not confirmed by configurations or official callbacks")
@@ -165,14 +188,15 @@ def analyze_frames(frames, scene_id, minimum=20):
         warnings.append("sensor ID verified by official callback; configuration query remains unavailable")
     if len(seen_cases) > 1:
         failures.append("case identity changed during capture")
-    contract_gaps = {
-        "parking": "parking-space geometry has no Perception field",
-        "speed_sign": "applicable numeric speed limit is not resolved",
-        "stop_line": "standalone stop-line observations have no Perception field",
-        "continuous": "mixed scenario capabilities require event-by-event review",
-    }
-    if capability in contract_gaps:
-        failures.append(contract_gaps[capability])
+    required_observation = {"parking": ("parking_frames", "parking-space geometry"),
+                            "speed_sign": ("speed_limit_frames", "applicable numeric speed limit"),
+                            "stop_line": ("stop_line_frames", "lane-associated stop-line geometry")}
+    if capability in required_observation:
+        counter, description = required_observation[capability]
+        if counts[counter] == 0:
+            failures.append(description + " not observed through a valid API data source")
+    if capability == "continuous":
+        warnings.append("mixed scenario capabilities require event-by-event review")
     if capability == "traffic_light" and counts["traffic_frames"] == 0:
         warnings.append("no applicable signal/stop-line pair observed")
     if capability == "continuous" and counts["route_frames"] == 0:

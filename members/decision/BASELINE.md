@@ -38,7 +38,7 @@ target_speed = clamp(v_raw, 0, 可信巡航/道路限速)
 
 默认巡航保持 **30 km/h（30/3.6 m/s）**。所有本模块调参仍用 `NEVC_DECISION_` 环境变量，显式代码参数优先；`NEVC_VEHICLE_FRONT_OFFSET_M` 是决策与规划共用的车头偏移输入。重要实验初值：`min_gap=4 m`、`time_headway=1.2 s`、`gap_gain=0.5 1/s`、`follow_deceleration=2 m/s²`、`reaction_time=0.3 s`、`standstill_speed=0.1 m/s`、`hold_distance=0.3 m`、`resume_margin=2 m`、`recovery_frames=3`。正值、有限值及整数帧数会校验。旧 `NEVC_DECISION_LAUNCH_TTC_CAP` 和 `NEVC_DECISION_STOP_MARGIN` 明确报废弃错误，不会静默假装生效。
 
-目前没有可信的 SimOne-Car 后轴到车头尺寸。未配置时，决策不会发布“已测得”的目标/红灯远端停点；带目标规划仍另需车身半宽，见 [规划的尺寸门槛](../planning/OBSTACLE_GUARD.md)。静态目标短时恒速/静止判断、横穿冲突窗、制动减速度和控制响应都需现场数据校核。ROS2 环境尚未提供，本次没有更换比赛运行入口。
+2026-10-02 集成更新：用户提供的 SimOne-Car 主车预设为轴距 2.9187 m、前悬 1 m、车宽 1.8 m。平台启动脚本 `scripts/StartCaptain.bat` 默认向决策和规划共同传入后轴到车头距离 `NEVC_VEHICLE_FRONT_OFFSET_M=3.9187` 和车身半宽 `NEVC_VEHICLE_HALF_WIDTH_M=0.9`，保留调用环境已有覆盖；实际值记录在启动日志中。更换车型须重新核对。直接运行 `main.py` 不经过该脚本，须自行提供这两个环境变量；未配置时仍保留尺寸未知保护，见 [规划的尺寸门槛](../planning/OBSTACLE_GUARD.md)。静态目标判断、横穿冲突窗、制动减速度和控制响应仍需现场校核；尺寸已提供不表示制动能力已标定。项目仍使用 Python 3.6 和 SimOne。
 
 ## 验证范围与下游交接
 
@@ -49,4 +49,4 @@ python -B -m unittest tests.test_decision tests.test_decision_compat tests.test_
 python -B -m unittest discover -s tests -v
 ```
 
-`DecisionTarget` 只是行为要求。规划仍按其自身几何与目标包络检查停车可行性，控制发送仍受队长配置与监护限制。当前没有现场车身尺寸、目标连续快照或 SimOne Python 3.6 环境的本轮验证；离线测试不代表赛题通过。公共接口未表达完整预测、变道、绕障、倒车、泊车或规划执行反馈，这些须由各模块负责人及队长另行协调。
+`DecisionTarget` 只是行为要求。规划仍按其自身几何与目标包络检查停车可行性，控制发送仍受队长配置与监护限制。合并后的主分支已在 SimOne Python 3.6 下通过 325 项离线测试，包含真实 `decide → plan → compute_control` 入口的静态停车、跟车启停和红绿灯启停模型测试。平台已有车道闭环发送及车辆运动记录，正式 Sensor API 目标流和上述目标/信号行为仍需逐场景实跑验收；离线通过不代表赛题通过。`Trajectory` 已可表达倒车、精确停车、最短停留和灯光意图，见 [控制交接](../control/MANEUVERS.md)；生产决策与规划仍未生成换道、绕障、倒车和泊车行为路径，也未提供完整预测与规划执行反馈。

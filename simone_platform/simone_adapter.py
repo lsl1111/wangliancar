@@ -13,6 +13,7 @@ from core.interfaces import ControlOut
 from simone_platform.sdk_compat import polling_structs
 from simone_platform.sensor_catalog import (TARGET_INGESTION_VERSION, sensor_kind,
                                            target_sensor_ids)
+from simone_platform.map_observations import MapObservationReader
 
 
 def _decode_sdk_text(value):
@@ -91,6 +92,7 @@ class SimOneAdapter(object):
                                     "sensor_configurations_valid": False,
                                     "environment": {}, "environment_valid": False}
         self._reference_update = 0.0
+        self._map_observations = None
         self._traffic_candidates = {}
         self._last_frame_times = {}
         self.sdk_version = ""
@@ -154,6 +156,8 @@ class SimOneAdapter(object):
             raise RuntimeError("SDK 尚未加载")
         self.map_loaded = bool(self.hdmap.loadHDMap(int(self.config.map_timeout_sec)))
         self._traffic_candidates = {}
+        self._map_observations = None
+        self._reference_update = 0.0
         if not self.map_loaded:
             self.logger.warning("高精地图加载失败；GPS/目标数据仍可继续输出")
         else:
@@ -575,37 +579,25 @@ class SimOneAdapter(object):
                     snapshot["environment_valid"] = True
         except Exception as exc:
             snapshot["reference_errors"].append("ENVIRONMENT_UNAVAILABLE:{0}".format(type(exc).__name__))
-        try:
-            if self.map_loaded and self.hdmap is not None and hasattr(self.hdmap, "getTrafficSignList"):
-                signs = self.hdmap.getTrafficSignList()
-                count = int(signs.Size())
-                if count < 0 or count > 10000:
-                    raise ValueError("traffic sign count out of range")
-                for i in range(count):
-                    sign = signs.GetElement(i)
-                    validities = getattr(sign, "validities", None)
-                    scopes = []
-                    for j in range(validities.Size() if validities else 0):
-                        scope = validities.GetElement(j)
-                        scopes.append({"road_id": int(scope.roadId),
-                                       "section_index": int(scope.sectionIndex),
-                                       "from_lane_id": int(scope.fromLaneId),
-                                       "to_lane_id": int(scope.toLaneId)})
-                    snapshot["traffic_signs"].append({
-                        "id": int(sign.id), "type": _map_string(sign.type),
-                        "sub_type": _map_string(sign.subType),
-                        "value": _map_string(sign.value), "unit": _map_string(sign.unit),
-                        "is_dynamic": bool(sign.isDynamic),
-                        "heading": float(sign.heading),
-                        "x": float(sign.pt.x), "y": float(sign.pt.y),
-                        "z": float(sign.pt.z), "validities": scopes})
-                snapshot["traffic_signs_valid"] = True
-        except Exception as exc:
-            snapshot["traffic_signs"] = []
-            snapshot["reference_errors"].append("TRAFFIC_SIGNS_UNAVAILABLE:{0}".format(type(exc).__name__))
+        if self.map_loaded and self.hdmap is not None:
+            snapshot.update(self._map_reader().catalog())
+            for name, meta in snapshot["map_observation_status"].items():
+                if meta["reason"] in ("read_failed", "invalid_records"):
+                    snapshot["reference_errors"].append(name.upper() + "_UNAVAILABLE:" + meta["reason"])
         self._reference_snapshot = snapshot
         self._reference_update = now
         return copy.deepcopy(snapshot)
+
+    def _map_reader(self):
+        if self._map_observations is None or self._map_observations.hdmap is not self.hdmap:
+            self._map_observations = MapObservationReader(self.hdmap)
+        return self._map_observations
+
+    def read_map_observations(self, lane_ids):
+        """Static lane-associated objects, independent of dynamic light colour."""
+        if not self.map_loaded or self.hdmap is None:
+            return {}
+        return self._map_reader().lane_objects(lane_ids)
 
     def _read_auxiliary_data(self, configurations):
         result = {"imu": {}, "imu_valid": False, "radar_detections": [],
