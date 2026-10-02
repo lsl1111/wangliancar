@@ -16,7 +16,7 @@ GPS 坐标是后轴中心。带目标的移动轨迹必须同时配置：
 - `NEVC_VEHICLE_FRONT_OFFSET_M`：后轴中心到车头最前端，米。
 - `NEVC_VEHICLE_HALF_WIDTH_M`：车身最大宽度的一半，米。
 
-本仓库只有试运行轴距，没有可信的前悬和车宽，因此**默认不填尺寸**，目标非空时规划会返回明确的无效原因。不要把离线测试里的合成尺寸复制到平台配置。SimOne 的车身结构定义了 `axisDistance`、`frontToFrontAxis` 和 `chassisWidth`，单位为厘米；若当前车型和 Python SDK 确认提供这些值，可核对车型后分别按 `(axisDistance + frontToFrontAxis)/100` 与 `chassisWidth/200` 换算。字段与单位见 [SimOne 车身结构文档](https://simone-docs.51sim.com/en/SimOneCpp/struct_sim_one___data___main_vehicle___body/index.html)。
+2026-10-02 集成更新：用户提供的 SimOne-Car 主车预设为轴距 291.87 cm、车头到前轴距离 100 cm、车宽 180 cm。`scripts/StartCaptain.bat` 默认传入后轴到车头距离 **3.9187 m** 和车身半宽 **0.9 m**，保留调用环境已有覆盖，并记录实际配置。它们来自该主车预设，不是测试中的合成尺寸；更换车型须重新核对。规划内部仍不编造尺寸，直接运行 `main.py` 须自行设置相同环境变量，缺失时目标非空的移动轨迹仍明确拒绝。SimOne 车身字段 `axisDistance`、`frontToFrontAxis`、`chassisWidth` 的换算分别为 `(axisDistance + frontToFrontAxis)/100` 与 `chassisWidth/200`；不要把轴距本身作为车头偏移。尺寸配置与制动响应标定是两项独立验证。
 
 其他可显式覆盖的实验参数为 `NEVC_PLANNING_OBSTACLE_MARGIN_M`（默认 4 m）、`NEVC_PLANNING_LATERAL_MARGIN_M`（默认 0 m）、`NEVC_PLANNING_MOTION_TOLERANCE_MPS`（默认 0 m/s）和 `NEVC_PLANNING_DECELERATION_MPS2`（默认 2 m/s²）。决策也读取同一个 `NEVC_VEHICLE_FRONT_OFFSET_M` 来计算目标净距与停止线距离；`NEVC_DECISION_FRONT_OFFSET_M` 是决策侧显式覆盖项，联调时不要与规划值设成不同数值。所有参数都需结合真实车辆尺寸、传感器噪声和制动响应验证。默认 0 m/s 的运动容差意味着检测到横向或反向目标速度时会拒绝普通移动轨迹。
 
@@ -24,4 +24,4 @@ GPS 坐标是后轴中心。带目标的移动轨迹必须同时配置：
 
 外接圆和静态停车边界较保守，会比实际矩形车身更早停车。它不预测切入、横穿、倒车或目标突然反向，也不证明控制能在指定距离内刹停。非空目标流来源不可信、车身尺寸未配置或目标尺寸缺失时不会放行；无目标的现有车道场景保持原流程。规划无效时由运行监护决定是否产生刹车候选，实际发送仍需团队按现有流程开启控制与安全制动。
 
-离线测试使用**显式的合成车身尺寸和踏板映射**，覆盖静止前车起步后停车、连续向前运动的前车、邻道车、弯道相交、横穿/迎面目标、未知尺寸、未知停车点，以及决策→规划→控制的候选命令。离线通过不等于 SimOne 场景通过。现场验收仍需按帧记录目标实际尺寸、车头到目标净距、停车误差和刹车响应；这些数据当前工作区不可用。
+离线算法测试使用**显式的合成车身尺寸和踏板映射**，覆盖静止前车起步后停车、连续向前运动的前车、邻道车、弯道相交、横穿/迎面目标、未知尺寸、未知停车点，以及真实决策→规划→控制入口的闭环模型。启动脚本测试另核对用户主车尺寸的默认值与覆盖逻辑。合并后的主分支已在 SimOne Python 3.6 下通过 325 项离线测试；这不等于 SimOne 场景通过。现场仍需取得正式目标源的连续观测，记录目标尺寸、车头净距、停车误差和刹车响应；已有全场景真值诊断不能替代该验收。
