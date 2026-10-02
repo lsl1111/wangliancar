@@ -52,11 +52,14 @@ class SimulatedSDK(object):
     def __init__(self, config, scene=4, frames=240, sensor=False,
                  target_ok=True, red_light=False, repeat=False, observe=False,
                  config_ok=True, gear_feedback=1, initial_offset=0.3,
-                 connected_curve=False, broken_curve=False, curve_exit_length=0):
+                 connected_curve=False, broken_curve=False, curve_exit_length=0,
+                 target_failures=(), target_velocity=None, target_sensor_id="perfectPerception1"):
         self.config, self.scene, self.frames = config, scene, frames
         self.sensor, self.target_ok = sensor, target_ok
         self.red_light, self.repeat, self.observe = red_light, repeat, observe
         self.config_ok, self.gear_feedback = config_ok, gear_feedback
+        self.target_failures, self.target_velocity = set(target_failures), target_velocity
+        self.target_sensor_id = target_sensor_id
         self.connected_curve, self.broken_curve = connected_curve, broken_curve
         self.curve_exit_length = curve_exit_length
         self.reads, self.now = 0, time.monotonic()
@@ -101,11 +104,18 @@ class SimulatedSDK(object):
     def targets(self, unused_vehicle, unused_sensor, data):
         data.frame, data.timestamp = self.reads, self.reads * 50
         data.objectSize, data.objects = 0, []
+        if unused_sensor != self.target_sensor_id or self.reads in self.target_failures:
+            return False
+        if self.target_velocity is not None:
+            data.objectSize = 1
+            data.objects = [SimpleNamespace(id=31, type=6, posX=40.0 + self.target_velocity * self.reads * 0.05,
+                posY=0.0, posZ=0.0, velX=self.target_velocity, velY=0.0, velZ=0.0,
+                length=4.0, width=1.8, height=1.5, probability=1.0)]
         return self.target_ok
 
     def configurations(self, unused_vehicle, data):
-        data.data = [SimpleNamespace(sensorId=b"perfectPerception1",
-                    sensorType=b"Perfect", hz=20, x=0.0, y=0.0, z=1.0,
+        data.data = [SimpleNamespace(sensorId=self.target_sensor_id.encode("utf-8"),
+                    sensorType=b"7", hz=20, x=0.0, y=0.0, z=1.0,
                     yaw=0.0)] if self.sensor else []
         data.dataSize = len(data.data)
         return self.config_ok
@@ -309,6 +319,60 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual([], sdk.perception["targets"])
         self.assertGreater(sdk.sent[0]["throttle"], 0.0)
         self.assertEqual("normal", sdk.pipelines[-1]["safety"]["mode"])
+
+    def test_required_empty_targets_work_across_tasks_with_discovered_nondefault_id(self):
+        for scene in (1, 14, 15, 25):
+            with self.subTest(scene=scene):
+                sdk = self.run_pipeline(scene=scene, sensor=True, frames=12,
+                                        target_sensor_id="actualTarget2")
+                self.assertGreater(sdk.speed, 0.0)
+                self.assertEqual("sensor:actualTarget2", sdk.perception["target_source"])
+                self.assertTrue(all(p["target_input"]["state"] == "valid_empty"
+                                    and p["send"]["reason"] == "sent" for p in sdk.pipelines))
+
+    def test_target_losses_stop_then_recover_through_real_four_module_chain(self):
+        failures = (8, 9) + tuple(range(45, 76))
+        for scene in (14, 15):
+            with self.subTest(scene=scene):
+                sdk = self.run_pipeline(scene=scene, sensor=True, frames=130,
+                                        target_sensor_id="actualTarget2", target_failures=failures)
+                by_frame = {p["perception_frame_id"]: p for p in sdk.pipelines}
+                for number in failures:
+                    p = by_frame[number]
+                    self.assertEqual("unavailable", p["target_input"]["state"])
+                    self.assertEqual("required_targets_unavailable", p["safety"]["reason"])
+                    self.assertEqual("safety_sent", p["send"]["reason"])
+                    self.assertEqual(0.0, p["safety"]["candidate"]["throttle"])
+                    self.assertGreater(p["safety"]["candidate"]["brake"], 0.0)
+                self.assertTrue(any(p["safety"]["reason"] == "recovery_waiting_for_fresh_frames"
+                                    for p in sdk.pipelines))
+                self.assertEqual("normal", sdk.pipelines[-1]["safety"]["mode"])
+                self.assertEqual("valid_empty", sdk.pipelines[-1]["target_input"]["state"])
+                self.assertEqual("sent", sdk.pipelines[-1]["send"]["reason"])
+                self.assertGreater(sdk.sent[-1]["throttle"], 0.0)
+
+    def test_static_and_moving_leads_enter_real_chain_without_source_protection(self):
+        with patch.dict(os.environ, {"NEVC_VEHICLE_FRONT_OFFSET_M": "3.9187",
+                                    "NEVC_VEHICLE_HALF_WIDTH_M": "0.9"}):
+            for scene, velocity in ((1, 0.0), (14, 2.0), (15, 2.0)):
+                with self.subTest(scene=scene, velocity=velocity):
+                    sdk = self.run_pipeline(scene=scene, sensor=True, frames=60,
+                                            target_sensor_id="actualTarget2", target_velocity=velocity)
+                    self.assertGreater(sdk.speed, 0.0)
+                    self.assertTrue(all(p["target_input"]["state"] == "valid_objects"
+                                        for p in sdk.pipelines))
+                    self.assertTrue(all(p["safety"]["reason"] != "required_targets_unavailable"
+                                        for p in sdk.pipelines))
+                    self.assertTrue(all(p["send"]["ok"] for p in sdk.pipelines))
+                    if velocity == 0.0:
+                        # A distant stationary lead permits approach while
+                        # KEEP_LANE carries the explicit bounded stop distance.
+                        self.assertTrue(all(p["decision"]["reason"].startswith("STOP_TARGET:")
+                                            and p["decision"]["stop_distance"] > 0
+                                            for p in sdk.pipelines))
+                    else:
+                        self.assertTrue(any(p["decision"]["mode"] == "FOLLOW"
+                                            for p in sdk.pipelines))
 
     def test_default_30_kmh_reaches_straight_cruise_and_keeps_curve_limits(self):
         with patch.dict(os.environ):

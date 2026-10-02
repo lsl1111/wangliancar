@@ -25,6 +25,16 @@
 
 `latest_pipeline.json.runtime.target_ingestion_version` 应为 `sensor-discovery-v2`。`captain.log` 新增“目标接入”记录，包含配置原因、候选 ID、实际选择、来源、读取方式和每个尝试的结果。周期记录同时显示目标来源/可用性、决策模式和原因，不再只显示 `targets=1`。
 
+`latest_pipeline.json.runtime.project_dir` 标明实际加载的项目目录；脚本路径绑定该目录的代码，不会因另一个工作目录的分支更新而自动更新。`target_input.state` 区分 `valid_objects`、`valid_empty` 与 `unavailable`，`required` 显示当前任务是否要求目标源。即使诊断真值有对象，正式状态仍为 `unavailable` 且 `diagnostic_only=true`；对象数量不能替代来源有效性。必需目标规则由感知、决策和监护共同复用 `core.scene_requirements`，不把可选 IMU、雷达或车道观测的缺失扩展为全车停车条件。
+
+可用只读工具核对快照所属任务保存的配置：
+
+```powershell
+python scripts/audit_task_sensors.py --platform-root E:\Sim-One --snapshot runtime_data/latest_perception.json
+```
+
+也可使用 `--task-id <实际任务ID>` 选择此前任务。工具仅输出主车名称/ID、启动与结束脚本、传感器列表数量及 ID/类型，不复制完整原始配置或连接凭据。结果表示保存后的运行配置，不能代替连续 Sensor API 帧；没有文件或字段时保持 `unknown`，不猜成无传感器。
+
 `latest_perception.json.source_status.targets` 保留以下诊断：
 
 | 字段 | 含义 |
@@ -76,3 +86,9 @@ Master 的本机资源注册还显示 3 个 `ScalableObjectBasedSensor` 节点�
 4. 重新启动前先开启 `accept_scene.py`。确认 `sensor:<实际ID>`、`sensor_read_ok=True`、`id_verified=True`、目标时效正常，再验收目标 ID、位置、速度、尺寸及下游收到的内容。不同场景不要求所有传感器都有数据，但需要目标观测的 01 不能用缺少目标源解释为空道路。
 
 核对依据是本机平台帮助 `contestant_instruction/contestant_instruction` 的“主车编辑介绍”和 `quick_start/quick_start` 的“选择和配置主车 / Step 3 配置传感器模型”，以及比赛命题文件表 4 指定的可移动目标输入渠道。没有通过修改决策算法或提升 Ground Truth 权限绕过这次输入故障。
+
+## main 跟车运行与集成验收（2026-10-02）
+
+用户通过 main 工作目录脚本运行 15 跟车任务时仍保护停车。已核对该任务 SimOneDriver 与 BridgeIO 的主车名称为 `NEVC_自动驾驶`、`mainVehicleId=0`、`generalSensors=[]`，脚本指向 `nevc_auto_main/scripts/StartCaptain.bat`。同时旧 main 没有目标源发现修复，因此存在代码集成缺口和本次平台任务输入缺口两项问题；合入代码并不能保证平台配置自动改变。具体是主车挂载、案例引用、保存还是发布配置问题，仍需平台核验。记录仅适用于该次任务，不推广到所有案例。
+
+集成测试使用真实感知、决策、规划、控制、监护和发送入口，SDK 输入与车辆模型为替身：覆盖 1/14/15/25 中非默认目标 ID 的有效空帧起步、14/15 短暂及持续目标源失效后的制动和恢复、静止前车接近停车及移动前车 FOLLOW；并保留直道/弯道、可选传感器缺失及控制结构检查。SimOne Python 3.6 下全量 369 项通过。尚未完成带正式目标数据的新一轮平台跟车验收，不能把离线结果称为场景成绩通过。
