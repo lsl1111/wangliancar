@@ -23,6 +23,8 @@ class TaskSensorAuditTests(unittest.TestCase):
             report = inspect_task(directory, "task1")
             self.assertEqual("empty_sensor_configuration", report["status"])
             self.assertEqual("captain.bat", report["files"][0]["records"][0]["start_script"])
+            self.assertEqual("NEVC_car", report["files"][0]["records"][0]["controller_name"])
+            self.assertNotIn("main_vehicle_name", report["files"][0]["records"][0])
             self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
             self.assertFalse(report["live_api_verified"])
 
@@ -39,7 +41,7 @@ class TaskSensorAuditTests(unittest.TestCase):
             report = inspect_task(directory, "task1")
             self.assertEqual("sensor_configuration_present", report["status"])
             record = report["files"][0]["records"][0]
-            self.assertEqual("自动驾驶", record["main_vehicle_name"])
+            self.assertEqual("自动驾驶", record["controller_name"])
             self.assertEqual([{"id": "camera2", "type": 1}], record["sensors"])
             self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
             self.assertFalse(report["live_api_verified"])
