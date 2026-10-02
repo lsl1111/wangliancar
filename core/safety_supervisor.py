@@ -9,6 +9,7 @@ import time
 
 from core.interfaces import ControlOut, DecisionMode
 from core.scene_requirements import requires_targets
+from core.traffic_quality import traffic_required, traffic_usable
 from core.validation import current
 
 
@@ -134,6 +135,8 @@ class SafetySupervisor(object):
                    or not getattr(perception, "target_source", "").startswith("sensor:")
                    or not self._target_records_valid(perception))):
             mode, reason = "controlled_stop", "required_targets_unavailable"
+        elif traffic_required(perception) and not traffic_usable(perception):
+            mode, reason = "controlled_stop", "required_traffic_unavailable"
         elif (current(decision, perception)
               and decision.mode == DecisionMode.EMERGENCY_BRAKE):
             mode, reason = "emergency_stop", "collision_or_emergency_request"

@@ -1,5 +1,7 @@
 # 通用决策框架（当前实现）
 
+2026-10-02 P0 集成：统一车头净距、跟车停走语义、精确停车意图和必需信号质量门控，完整合同见 [链路修复](../../P0_HANDOFF_FIXES.md)。
+
 2026-10-01 从 V1 行为树改为**事实与来源 → 路线关系 → 约束集合 → 行为状态 → `DecisionTarget`**。仍使用 Python 3.6、SimOne 和固定 `decide(perception)` 入口，不新增公共字段或控制指令。V1 的交付历史见 [本地接入记录](INTEGRATION.md)；本文件描述当前算法。
 
 ## 输入事实与路线关系
@@ -7,7 +9,7 @@
 - 自车必须有有效且未过期的 GPS 来源、可用车道与可投影的当前中心线；原始 `ego.gear` 只要求整数，反向运动由速度向路线切向投影判断。
 - 场景是否必需目标流仍由 `core.scene_requirements.requires_targets()` 决定。只接受新鲜、可用的 Sensor API 目标；Ground Truth 仅作诊断，可选传感器缺失不阻塞车道场景。`sensor_read_ok=False`、过期、无效记录和未配置有不同的稳定原因前缀。
 - `candidates.py` 将目标区分为当前车道、已核实的**第一条**连续后继车道、已核实其他车道与未知关系。GPS 先锚定当前车道；连续路线须含不变的当前中心线前缀，目标投影拒绝端点外推和回环歧义。后续第二条及更远车道没有公开的分段边界，暂按未知保护。
-- 目标长宽采用外接圆求保守后缘。只有配置经核实的 `front_offset_m`（后轴中心到车头）才把路线弧长变成车头净距与已知障碍停车边界。缺车身/目标尺寸或可靠投影时不以零代替。目标朝向未被独立证明可靠，故未用其缩小外接包络。
+- 有限目标朝向采用矩形沿路线的半长求后缘；缺失朝向保留外接圆。只有配置经核实的 `front_offset_m`（后轴中心到车头）才把路线弧长变成车头净距与已知障碍停车边界。缺车身/目标尺寸或可靠投影时不以零代替。朝向缺失时为 `None`，不能用默认零朝向缩小包络。
 
 ## 约束仲裁与输出
 
@@ -18,7 +20,7 @@
 3. 多个已知停点取最近者；可信限速、所有移动前车速度需求取共同上界。已知停点尚远时输出 `KEEP_LANE` 或 `FOLLOW` 的**正速度需求和非负 `stop_distance`**；规划仍决定逐点加减速。
 4. 到停车边界且真正静止时输出 `STOP/0/0`。HOLD 以独立的进入距离与释放余量防抖，连续两个新的清空观测后释放。正常状态为 `CRUISE`、`FOLLOW`、`APPROACH_STOP`、`HOLD` 或 `YIELD`；它们只映射到既有四个公共模式，不假装新增变道或让行协议。
 
-静止目标提供停车边界；同向移动前车提供跟车速度。路线前车的公共 `target_lane_id` 始终是**当前自车车道**，不把后继车道误报为变道目标。交通停止线距离按同一后轴参考扣除车头偏移与停车余量。理由文本使用 `STOP_TARGET`、`STOP_TRAFFIC`、`FOLLOW_TARGET`、`TARGET_UNKNOWN`、`TARGET_SOURCE` 等稳定前缀，仍不是供下游解析的协议。
+静止目标提供停车边界；同向移动前车提供跟车速度。跟车任务及已跟随目标停稳后保留跟车净距，AEB 静态停车保持独立业务语义。默认静态余量 0.5 m、交通停止线余量 0.3 m；近风险保护可能要求更早停车。路线前车的公共 `target_lane_id` 始终是**当前自车车道**，不把后继车道误报为变道目标。交通停止线距离按同一后轴参考扣除车头偏移与停车余量。理由文本使用 `STOP_TARGET`、`STOP_TRAFFIC`、`FOLLOW_TARGET`、`TARGET_UNKNOWN`、`TARGET_SOURCE` 等稳定前缀，仍不是供下游解析的协议。
 
 移动前车的试验速度需求为：
 
@@ -36,7 +38,7 @@ target_speed = clamp(v_raw, 0, 可信巡航/道路限速)
 
 ## 参数与现场边界
 
-默认巡航保持 **30 km/h（30/3.6 m/s）**。所有本模块调参仍用 `NEVC_DECISION_` 环境变量，显式代码参数优先；`NEVC_VEHICLE_FRONT_OFFSET_M` 是决策与规划共用的车头偏移输入。重要实验初值：`min_gap=4 m`、`time_headway=1.2 s`、`gap_gain=0.5 1/s`、`follow_deceleration=2 m/s²`、`reaction_time=0.3 s`、`standstill_speed=0.1 m/s`、`hold_distance=0.3 m`、`resume_margin=2 m`、`recovery_frames=3`。正值、有限值及整数帧数会校验。旧 `NEVC_DECISION_LAUNCH_TTC_CAP` 和 `NEVC_DECISION_STOP_MARGIN` 明确报废弃错误，不会静默假装生效。
+默认巡航保持 **30 km/h（30/3.6 m/s）**。所有本模块调参仍用 `NEVC_DECISION_` 环境变量，显式代码参数优先；`NEVC_VEHICLE_FRONT_OFFSET_M` 是决策与规划共用的车头偏移输入。重要实验初值：`min_gap=10.5 m`、`time_headway=1.2 s`、`gap_gain=0.5 1/s`、`follow_deceleration=2 m/s²`、`reaction_time=0.3 s`、`standstill_speed=0.1 m/s`、`hold_distance=0.05 m`、`resume_margin=2 m`、`recovery_frames=3`。正值、有限值及整数帧数会校验。旧 `NEVC_DECISION_LAUNCH_TTC_CAP` 和 `NEVC_DECISION_STOP_MARGIN` 明确报废弃错误，不会静默假装生效。
 
 2026-10-02 集成更新：用户提供的 SimOne-Car 主车预设为轴距 2.9187 m、前悬 1 m、车宽 1.8 m。平台启动脚本 `scripts/StartCaptain.bat` 默认向决策和规划共同传入后轴到车头距离 `NEVC_VEHICLE_FRONT_OFFSET_M=3.9187` 和车身半宽 `NEVC_VEHICLE_HALF_WIDTH_M=0.9`，保留调用环境已有覆盖；实际值记录在启动日志中。更换车型须重新核对。直接运行 `main.py` 不经过该脚本，须自行提供这两个环境变量；未配置时仍保留尺寸未知保护，见 [规划的尺寸门槛](../planning/OBSTACLE_GUARD.md)。静态目标判断、横穿冲突窗、制动减速度和控制响应仍需现场校核；尺寸已提供不表示制动能力已标定。项目仍使用 Python 3.6 和 SimOne。
 

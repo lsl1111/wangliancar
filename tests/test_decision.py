@@ -188,9 +188,9 @@ class DecisionTests(unittest.TestCase):
         p = perception(speed=5.0)
         add_red_light(p, 30.0, ambiguous=True)
         result = self.run_engine(p)
-        self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
-        self.assertGreater(result.stop_distance, 0.0)
-        self.assertIn("STOP_TRAFFIC", result.reason)
+        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, result.mode)
+        self.assertEqual(0.0, result.target_speed)
+        self.assertIn("TRAFFIC_SOURCE", result.reason)
 
     def test_unknown_stop_line_position_still_stops(self):
         p = perception(speed=5.0)
@@ -255,7 +255,7 @@ class DecisionTests(unittest.TestCase):
 
     def test_time_to_collision_rule_does_not_fire_at_a_standstill(self):
         p = perception(speed=0.0)
-        add_target(p, longitudinal=6.5, speed=0.0, length=4.0)
+        add_target(p, longitudinal=6.0, speed=0.0, length=4.0)
         held = self.run_engine(p)
         self.assertEqual(DecisionMode.STOP, held.mode)
         self.assertEqual(0.0, held.stop_distance)
@@ -309,7 +309,7 @@ class DecisionTests(unittest.TestCase):
     def test_follow_speed_falls_with_gap_and_obeys_braking_envelope(self):
         settings = DecisionSettings(cruise_speed=8.0, front_offset_m=3.5)
         results = []
-        for distance in (30.0, 20.0, 6.5):
+        for distance in (30.0, 20.0, 6.0):
             p = perception(speed=0.0)
             add_target(p, longitudinal=distance, speed=0.0)
             results.append(self.run_engine(p, settings))
@@ -325,7 +325,7 @@ class DecisionTests(unittest.TestCase):
         speeds = []
         modes = []
         stops = []
-        for frame, distance in enumerate((30.0, 25.0, 20.0, 15.0, 8.5)):
+        for frame, distance in enumerate((30.0, 25.0, 20.0, 15.0, 6.0)):
             p = perception(speed=0.0, frame_id=frame)
             add_target(p, longitudinal=distance, speed=0.0)
             result = engine.run(p)
@@ -376,7 +376,7 @@ class DecisionTests(unittest.TestCase):
         long.id = 2
         result = self.run_engine(p)
         self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
-        self.assertLess(result.stop_distance, 1.0)
+        self.assertAlmostEqual(result.stop_distance, 3.0)
         self.assertIn("STOP_TARGET:id=2", result.reason)
         unknown = add_target(p, longitudinal=30.0, length=0.0)
         unknown.id = 3
@@ -529,7 +529,7 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(11.1, settings.cruise_speed)
         self.assertEqual(1.5, settings.time_headway)
         # Untouched parameters keep their built-in values.
-        self.assertEqual(4.0, settings.min_gap)
+        self.assertEqual(10.5, settings.min_gap)
 
     def test_shared_vehicle_front_offset_environment_is_used(self):
         settings = DecisionSettings.from_environment(

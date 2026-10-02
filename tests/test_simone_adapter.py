@@ -89,6 +89,7 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(recovered["targets_valid"])
         self.assertEqual("ground_truth", recovered["target_source"])
         self.assertEqual(6, recovered["targets"][0]["type"])
+        self.assertIsNone(recovered["targets"][0]["heading"])
         sensor_config.sensorType = b"Radar"
         adapter._reference_update = 0.0
         calls = []
@@ -128,6 +129,28 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(22.0, observed[0]["stop_line_x"])
             self.assertEqual(9, observed[0]["count_down"])
         self.assertEqual(["1_0_-1"], calls)
+        # The association survives failure; the last successful RED is not reused.
+        adapter.sensor_api.SoGetTrafficLights = lambda *args: False
+        missing = adapter.read_traffic("1_0_-1")
+        self.assertEqual(42, missing[0]["opendrive_id"])
+        self.assertEqual(22.0, missing[0]["stop_line_x"])
+        self.assertEqual(0, missing[0]["status"])
+        self.assertFalse(missing[0]["read_ok"])
+        self.assertTrue(adapter.last_traffic_query["association_valid"])
+        self.assertFalse(adapter.last_traffic_query["read_ok"])
+        adapter.sensor_api.SoGetTrafficLights = read_light
+        self.assertTrue(adapter.read_traffic("1_0_-1")[0]["read_ok"])
+
+    def test_empty_map_signals_are_distinct_from_missing_map_api(self):
+        adapter = self._adapter()
+        adapter.map_loaded = True
+        adapter.hdmap = SimpleNamespace(getTrafficLightList=lambda: Vector([]),
+                                       getStoplineList=lambda *args: Vector([]))
+        self.assertEqual([], adapter.read_traffic("lane"))
+        self.assertTrue(adapter.last_traffic_query["association_valid"])
+        adapter.map_loaded = False
+        self.assertEqual([], adapter.read_traffic("lane"))
+        self.assertFalse(adapter.last_traffic_query["association_valid"])
 
     def test_auxiliary_sensor_sources_stay_separate(self):
         adapter = self._adapter()
