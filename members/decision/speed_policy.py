@@ -33,9 +33,17 @@ def follow_speed(candidate, ego_speed, cruising, settings):
 
 
 def approach_speed(stop_distance, ego_speed, cruising, settings):
-    """Demand no faster than a provisional stop-distance envelope."""
+    """Use a gentler approach envelope before the hard braking boundary.
+
+    Replanning starts at measured speed. Using the same deceleration as the
+    infeasibility guard lets that reference remain above measured speed until
+    the next observation is already infeasible, even with a valid stop line.
+    The ratio reserves braking response margin without relaxing that guard.
+    """
     usable = max(0.0, stop_distance - ego_speed * settings.reaction_time)
-    cap = math.sqrt(2.0 * settings.follow_deceleration * usable)
+    approach_deceleration = (settings.follow_deceleration
+                             * settings.approach_deceleration_ratio)
+    cap = math.sqrt(2.0 * approach_deceleration * usable)
     return min(float(cruising), cap)
 
 
