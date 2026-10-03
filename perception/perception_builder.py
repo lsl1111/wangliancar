@@ -231,6 +231,14 @@ class PerceptionBuilder(object):
         if not result.targets_valid and requires_targets(result.scene_id):
             result.errors.append("TARGETS_UNAVAILABLE")
         result.traffic = self._build_traffic(result.ego, result.lane, result.errors)
+        result.source_status["traffic"] = {
+            "clock": "host_query",  # this SDK structure has no frame header
+            "association_valid": result.traffic.association_valid,
+            "signal_presence": result.traffic.signal_presence,
+            "required": result.traffic.required,
+            "usable": result.traffic.valid,
+            "quality": "ok" if result.traffic.valid else result.traffic.reason,
+        }
         if result.traffic.observed:
             result.traffic_source = "hdmap+simone"
         result.valid = result.ego.valid
@@ -289,14 +297,15 @@ class PerceptionBuilder(object):
         except Exception as exc:
             errors.append("TRAFFIC_UNAVAILABLE:" + type(exc).__name__)
             return traffic
+        query = getattr(self.adapter, "last_traffic_query", {})
+        traffic.association_valid = (isinstance(query, dict)
+                                     and query.get("association_valid") is True)
         origin = project_polyline(lane.center_line, ego.x, ego.y)
         if origin is None:
             return traffic
         for light in lights:
             try:
                 status = int(light.get("status", 0))
-                if status not in _TRAFFIC_LIGHT_STATUS or status == 0:
-                    continue
                 sx, sy = float(light["stop_line_x"]), float(light["stop_line_y"])
                 if not all(math.isfinite(v) for v in (sx, sy)):
                     raise ValueError("invalid stopline")
@@ -311,7 +320,9 @@ class PerceptionBuilder(object):
                 item["opendrive_id"] = int(light.get("opendrive_id", -1))
                 item["count_down"] = int(light.get("count_down", -1))
                 item["stop_distance"] = distance
-                item["signal_state"] = _TRAFFIC_LIGHT_STATUS[status]
+                item["signal_state"] = _TRAFFIC_LIGHT_STATUS.get(status, "UNKNOWN")
+                item["read_ok"] = (light.get("read_ok", True) is True
+                                   and status in _TRAFFIC_LIGHT_STATUS and status != 0)
                 item["signal_distance"] = -1.0
                 if light.get("x") is not None and light.get("y") is not None:
                     x, y = float(light["x"]), float(light["y"])
@@ -323,17 +334,32 @@ class PerceptionBuilder(object):
                 traffic.candidates.append(item)
             except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
                 errors.append("TRAFFIC_RECORD_INVALID")
+                traffic.required = True
+                traffic.reason = "signal_record_invalid"
         traffic.candidates.sort(key=lambda item: item["stop_distance"])
         if not traffic.candidates:
+            if traffic.association_valid and not traffic.required:
+                traffic.signal_presence = "absent"
+                traffic.reason = "no_applicable_signal_ahead"
             return traffic
+        traffic.association_valid = True
+        traffic.signal_presence = "present"
+        traffic.required = True
         traffic.observed = True
         nearest = traffic.candidates[0]
         traffic.stop_line_distance = nearest["stop_distance"]
         group = [item for item in traffic.candidates
                  if abs(item["stop_distance"] - nearest["stop_distance"]) < 1.0]
+        if traffic.reason == "signal_record_invalid":
+            return traffic
+        if any(item["read_ok"] is not True for item in group):
+            traffic.reason = "signal_read_unavailable"
+            errors.append("TRAFFIC_STATE_UNAVAILABLE")
+            return traffic
         # Direction association is not exposed reliably by this binding. Retain
         # candidates, mark ambiguity, and never choose a green by list order.
-        if len(set(item["opendrive_id"] for item in group)) > 1:
+        if (len(set(item["opendrive_id"] for item in group)) > 1
+                or len(set(item["signal_state"] for item in group)) > 1):
             traffic.ambiguous, traffic.reason = True, "signal_direction_unresolved"
             errors.append("TRAFFIC_AMBIGUOUS")
             return traffic
@@ -418,7 +444,7 @@ class PerceptionBuilder(object):
         target.vx = float(item.get("vx", 0.0))
         target.vy = float(item.get("vy", 0.0))
         target.vz = float(item.get("vz", 0.0))
-        target.heading = float(item.get("heading", 0.0))
+        target.heading = float(item["heading"]) if item.get("heading") is not None else None
         target.roll = float(item.get("roll", 0.0))
         target.pitch = float(item.get("pitch", 0.0))
         target.sdk_data = dict(item.get("sdk_data", {}))
@@ -454,9 +480,10 @@ class PerceptionBuilder(object):
         target.valid = (target.id >= 0 and 0.05 <= target.probability <= 1.0 and
                         all(math.isfinite(value) for value in
                             (target.x, target.y, target.z, target.vx, target.vy, target.vz,
-                             target.heading, target.ax, target.ay, target.az,
+                             target.ax, target.ay, target.az,
                              target.length, target.width, target.height,
                              target.probability, target.distance, target.sensor_range))
+                        and (target.heading is None or math.isfinite(target.heading))
                         and _finite_data(item)
                         and min(target.length, target.width, target.height) >= 0
                         and _finite_data(target.bbox2d)

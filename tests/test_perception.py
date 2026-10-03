@@ -118,7 +118,7 @@ class PerceptionTests(unittest.TestCase):
         self.assertFalse(value.valid)
         self.assertIn("GPS_UNAVAILABLE", value.errors)
 
-    def test_rear_light_and_missing_stop_line_are_not_selected(self):
+    def test_missing_stop_line_does_not_allow_a_farther_green(self):
         class Lights(FakeAdapter):
             def read_traffic(self, lane_id):
                 return [
@@ -130,7 +130,9 @@ class PerceptionTests(unittest.TestCase):
                 ]
         self.builder.adapter = Lights()
         value = self.builder.build_from_raw({"gps": self._gps(), "targets": []})
-        self.assertEqual("GREEN", value.traffic.signal_state)
+        self.assertEqual("UNKNOWN", value.traffic.signal_state)
+        self.assertTrue(value.traffic.required)
+        self.assertFalse(value.traffic.valid)
         self.assertAlmostEqual(38.0, value.traffic.stop_line_distance)
         self.assertIn("TRAFFIC_RECORD_INVALID", value.errors)
 

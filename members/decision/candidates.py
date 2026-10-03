@@ -6,6 +6,7 @@ vehicle extent uncertainty remain explicit instead of becoming zero metres.
 """
 
 import math
+from core.obstacle_geometry import longitudinal_extent
 
 
 
@@ -159,10 +160,11 @@ def build_candidate(target, ego, perception, route, settings):
     candidate.lateral_speed = -math.sin(heading) * target.vx + math.cos(heading) * target.vy
     candidate.static = math.hypot(target.vx, target.vy) <= settings.static_speed_threshold
     extent = None
+    collision_extent = None
     if (_finite(target.length) and _finite(target.width)
             and target.length > 0.0 and target.width > 0.0):
-        # The circumscribed circle bounds any unpublished orientation.
-        extent = 0.5 * math.hypot(target.length, target.width)
+        extent = longitudinal_extent(target, heading)
+        collision_extent = 0.5 * math.hypot(target.length, target.width)
     dx, dy = target.x - ego.x, target.y - ego.y
     ego_longitudinal = math.cos(ego.heading) * dx + math.sin(ego.heading) * dy
     ego_lateral = -math.sin(ego.heading) * dx + math.cos(ego.heading) * dy
@@ -170,7 +172,7 @@ def build_candidate(target, ego, perception, route, settings):
     lane_half = (lane.lane_width * 0.5 if lane.lane_width_valid and
                  _finite(lane.lane_width) and lane.lane_width > 0.0
                  else settings.projection_tolerance_m)
-    corridor = lane_half + (extent if extent is not None else settings.min_gap)
+    corridor = lane_half + (collision_extent if collision_extent is not None else settings.min_gap)
     if projection is None and ego_longitudinal < -corridor:
         return candidate
     entering = (candidate.lateral_speed is not None and
@@ -180,7 +182,7 @@ def build_candidate(target, ego, perception, route, settings):
     if candidate.relation in (CURRENT_LANE, FORWARD_ROUTE):
         candidate.conflict = ahead or projection is None
     elif candidate.relation == OTHER_LANE:
-        overlap = extent is not None and lateral <= extent
+        overlap = collision_extent is not None and lateral <= collision_extent
         candidate.conflict = (overlap or entering) and (ahead or projection is None)
     else:
         candidate.conflict = (lateral <= corridor or entering) and (

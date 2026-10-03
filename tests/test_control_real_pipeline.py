@@ -101,6 +101,24 @@ class RealPipelineControlTests(unittest.TestCase):
                 decision_stub.reset_decision(self.settings)
                 self.follow(curved)
 
+    def test_aeb_static_target_stays_stopped_after_emergency_braking(self):
+        plant = BidirectionalPlant()
+        held = False
+        for frame in range(1, 1201):
+            p = self.sample(plant, frame)
+            p.scene_id = 1
+            add_target(p, longitudinal=60-plant.x, speed=0)
+            _, _, output = self.step(plant, p)
+            gap = 60-plant.x-3.5-2.0
+            self.assertGreater(gap, 0)
+            if self.now[0] >= 30:
+                self.assertEqual(0, output.throttle)
+                self.assertLess(plant.speed, 0.05)
+                self.assertGreater(gap, 1)
+                self.assertLess(gap, 3.5)
+                held = held or output.diagnostics["state"] == "HOLD"
+        self.assertTrue(held)
+
     def follow(self, curved):
         plant = (BidirectionalPlant(x=40, heading=math.pi/2)
                  if curved else BidirectionalPlant())
@@ -127,7 +145,7 @@ class RealPipelineControlTests(unittest.TestCase):
                 target.heading = yaw
             _, _, output = self.step(plant, p)
             max_lateral = max(max_lateral, output.diagnostics.get("cross_track_abs_m", 0))
-            minimum_gap = min(minimum_gap, lead_s-progress)
+            minimum_gap = min(minimum_gap, lead_s-progress-3.5-2.0)
             if 18 <= seconds < 23:
                 held = held or output.diagnostics["state"] == "HOLD"
             if seconds >= 23 and held and output.throttle > 0:
@@ -156,7 +174,8 @@ class RealPipelineControlTests(unittest.TestCase):
             if self.now[0] >= 23 and output.throttle > 0 and restart_time is None:
                 restart_time = self.now[0]
         self.assertIsNotNone(held_position)
-        self.assertLess(held_position, 33.5)
+        self.assertGreaterEqual(40-held_position-3.5, 0.0)
+        self.assertLessEqual(40-held_position-3.5, 0.5)
         self.assertIsNotNone(restart_time)
         self.assertLess(restart_time-23, 5)
         self.assertGreater(plant.x, 80)

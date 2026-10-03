@@ -477,7 +477,7 @@ class SimOneAdapter(object):
             "vx": float(item.velX),
             "vy": float(item.velY),
             "vz": float(item.velZ),
-            "heading": float(getattr(item, "oriZ", 0.0)),
+            "heading": float(item.oriZ) if getattr(item, "oriZ", None) is not None else None,
             "roll": float(getattr(item, "oriX", 0.0)),
             "pitch": float(getattr(item, "oriY", 0.0)),
             "ax": float(getattr(item, "accelX", 0.0)),
@@ -744,10 +744,13 @@ class SimOneAdapter(object):
         the static light ids discovered from the HD map (getTrafficLightList).
         Returns a list of dicts, one per currently relevant traffic light:
           {opendrive_id, status, count_down, x, y}
-        When no light or map is available it returns [] (perception keeps the
-        TrafficControl fields at their UNKNOWN/invalid defaults).
+        A failed dynamic read retains its map candidate with read_ok=False.
+        last_traffic_query distinguishes confirmed association from an absent
+        map API; [] alone is not proof that a road has no applicable signal.
         """
         lights = []
+        # Reset every query: never reuse a previous green/read receipt.
+        self.last_traffic_query = {"association_valid": False, "read_ok": False}
         if (not lane_id or not self.map_loaded or self.hdmap is None or
                 not hasattr(self.hdmap, "getTrafficLightList") or
                 not hasattr(self.hdmap, "getStoplineList")):
@@ -755,10 +758,14 @@ class SimOneAdapter(object):
         if lane_id not in self._traffic_candidates:
             candidates = []
             traffic_light_list = self.hdmap.getTrafficLightList()
+            if traffic_light_list is None:
+                return lights
             count = int(traffic_light_list.Size()) if traffic_light_list else 0
             for index in range(count):
                 light = traffic_light_list.GetElement(index)
                 stoplines = self.hdmap.getStoplineList(light, self.hdmap.pySimString(lane_id))
+                if stoplines is None:
+                    return lights  # unknown association, not confirmed absence
                 if not stoplines:
                     continue
                 stop_points = []
@@ -777,17 +784,26 @@ class SimOneAdapter(object):
                     candidates.append((int(light.id), getattr(pt, "x", None),
                                        getattr(pt, "y", None), stop_points))
             self._traffic_candidates[lane_id] = candidates
+        self.last_traffic_query = {"association_valid": True, "read_ok": True}
         for opendrive_id, x, y, stop_points in self._traffic_candidates[lane_id]:
-            native = self.structs.SimOne_Data_TrafficLight()
-            if not self.sensor_api.SoGetTrafficLights(
-                self.config.vehicle_id, opendrive_id, native
-            ):
-                continue
+            read_ok = False
+            status, count_down = 0, -1
+            try:
+                native = self.structs.SimOne_Data_TrafficLight()
+                read_ok = bool(self.sensor_api.SoGetTrafficLights(
+                    self.config.vehicle_id, opendrive_id, native))
+                if read_ok:
+                    status, count_down = _sdk_int(native.status), int(native.countDown)
+            except Exception:
+                read_ok, status, count_down = False, 0, -1
+            if not read_ok:
+                self.last_traffic_query["read_ok"] = False
             for sx, sy in stop_points:
                 lights.append({
                     "opendrive_id": opendrive_id,
-                    "status": _sdk_int(native.status),
-                    "count_down": int(native.countDown),
+                    "status": status,
+                    "count_down": count_down,
+                    "read_ok": read_ok,
                     "stop_line_x": sx,
                     "stop_line_y": sy,
                     "x": float(x) if isinstance(x, (int, float)) else None,

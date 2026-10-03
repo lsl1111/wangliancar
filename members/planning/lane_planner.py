@@ -266,6 +266,7 @@ def build_trajectory(perception, decision, settings=None):
             raise ValueError("unknown stop distance must be -1")
         output.target_lane_id = decision.target_lane_id or perception.lane.lane_id
         output.stop_distance = decision.stop_distance
+        output.precision_stop = decision.precision_stop and decision.stop_distance >= 0
         output.stop_required = decision.mode in (DecisionMode.STOP, DecisionMode.EMERGENCY_BRAKE)
         if decision.mode == DecisionMode.EMERGENCY_BRAKE:
             _hold(output, ego, True, "emergency stop requested; controller must brake", settings)
@@ -317,7 +318,10 @@ def _moving_reference(output, perception, decision, settings):
         output.stop_distance = 0.0
         _hold(output, ego, ego.speed > EPS, "end of known reference", settings)
         return
-    obstacle_limit = (obstacle_stop(perception, reference, settings)
+    clearance = (decision.obstacle_clearance_m
+                 if decision.obstacle_clearance_m >= 0 else None)
+    obstacle_limit = (obstacle_stop(perception, reference, settings, clearance,
+                                   decision.obstacle_clearances_m)
                       if perception.targets and not optional_unavailable else None)
     stop = remaining
     stopping = decision.mode == DecisionMode.STOP or decision.target_speed == 0

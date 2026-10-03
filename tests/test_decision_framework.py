@@ -36,8 +36,8 @@ class FrameworkTests(unittest.TestCase):
         near = self.decide(p)
         self.assertLess(near.stop_distance, first.stop_distance)
         p = perception(speed=0.0, frame_id=3)
-        p.ego.x = 21.5
-        add_target(p, longitudinal=8.5, speed=0.0)
+        p.ego.x = 24.0
+        add_target(p, longitudinal=6.0, speed=0.0)
         held = self.decide(p)
         self.assertEqual(DecisionMode.STOP, held.mode)
         self.assertEqual(0.0, held.stop_distance)
@@ -48,9 +48,9 @@ class FrameworkTests(unittest.TestCase):
         decision = self.decide(p)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertGreater(decision.target_speed, 0.0)
-        self.assertAlmostEqual(23.5, decision.stop_distance)
+        self.assertAlmostEqual(26.2, decision.stop_distance)
         p = perception(speed=0.0, frame_id=8)
-        add_red_light(p, 6.5)
+        add_red_light(p, 3.8)
         held = self.decide(p)
         self.assertEqual(DecisionMode.STOP, held.mode)
         self.assertEqual(0.0, held.stop_distance)
@@ -94,8 +94,8 @@ class FrameworkTests(unittest.TestCase):
 
     def test_following_at_desired_gap_matches_lead_speed(self):
         p = perception(speed=6.0)
-        # Circle extent for 4 x 1.8 m is about 2.193 m.
-        add_target(p, longitudinal=11.2 + 3.5 + (4.0 ** 2 + 1.8 ** 2) ** 0.5 / 2,
+        # Desired net gap plus the front offset and aligned target half-length.
+        add_target(p, longitudinal=self.settings.min_gap + 1.2*6 + 3.5 + 2,
                    speed=6.0)
         result = self.decide(p)
         self.assertEqual(DecisionMode.FOLLOW, result.mode)
@@ -174,7 +174,7 @@ class FrameworkTests(unittest.TestCase):
 
     def test_hold_requires_confirmed_clear_frames(self):
         p = perception(speed=0.0, frame_id=1)
-        add_red_light(p, 6.5)
+        add_red_light(p, 3.8)
         self.assertEqual(DecisionMode.STOP, self.decide(p).mode)
         p = perception(speed=0.0, frame_id=2)
         self.assertEqual(DecisionMode.STOP, self.decide(p).mode)
@@ -246,10 +246,10 @@ class FrameworkTests(unittest.TestCase):
         self.assertNotIn("FOLLOW_TARGET", result.reason)
 
     def test_hold_hysteresis_ignores_small_stop_point_jitter(self):
-        for frame, distance, expected in ((1, 8.8, DecisionMode.STOP),
-                                          (2, 9.1, DecisionMode.STOP),
-                                          (3, 10.9, DecisionMode.STOP),
-                                          (4, 10.9, DecisionMode.KEEP_LANE)):
+        for frame, distance, expected in ((1, 6.0, DecisionMode.STOP),
+                                          (2, 6.3, DecisionMode.STOP),
+                                          (3, 8.3, DecisionMode.STOP),
+                                          (4, 8.3, DecisionMode.KEEP_LANE)):
             p = perception(speed=0.0, frame_id=frame)
             add_target(p, longitudinal=distance, speed=0.0)
             self.assertEqual(expected, self.decide(p).mode)
@@ -385,7 +385,7 @@ class FrameworkTests(unittest.TestCase):
 
     def test_small_residual_speed_stop_is_upgraded_by_real_planner(self):
         p = perception(speed=0.08)
-        add_red_light(p, 6.5)
+        add_red_light(p, 3.8)
         decision = DecisionEngine(self.settings).run(p)
         self.assertEqual(DecisionMode.STOP, decision.mode)
         self.assertEqual(0.0, decision.stop_distance)

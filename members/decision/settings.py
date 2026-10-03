@@ -55,14 +55,14 @@ def overrides_from_environment(environ=None):
 
 
 class DecisionSettings(object):
-    def __init__(self, cruise_speed=30.0 / 3.6, min_gap=4.0,
+    def __init__(self, cruise_speed=30.0 / 3.6, min_gap=10.5,
                  time_headway=1.2, gap_gain=0.5, resume_margin=2.0,
-                 hold_distance=0.3,
+                 hold_distance=0.05,
                  follow_deceleration=2.0, reaction_time=0.3,
                  front_offset_m=None, emergency_clearance=2.0,
                  emergency_ttc=2.0, static_speed_threshold=0.3,
                  standstill_speed=0.1, blind_speed_tolerance=0.5,
-                 traffic_stop_margin=3.0, obstacle_stop_margin=3.0,
+                 traffic_stop_margin=0.3, obstacle_stop_margin=0.5,
                  projection_tolerance_m=2.5, route_ambiguity_m=2.0,
                  conflict_horizon_s=3.0, recovery_frames=3,
                  release_frames=2):

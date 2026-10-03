@@ -12,6 +12,7 @@ with targets can be marked valid.
 import math
 
 from core.geometry import project_polyline
+from core.obstacle_geometry import footprint_entry
 from core.validation import number
 
 
@@ -50,34 +51,12 @@ def _lateral_drift(perception, target, projection, velocity, settings):
     return drift
 
 
-def _entry_distance(reference, x, y, radius):
-    """First arclength at which a path segment enters a circular envelope."""
-    for (sa, a), (sb, b) in zip(reference, reference[1:]):
-        dx, dy = b[0] - a[0], b[1] - a[1]
-        fx, fy = a[0] - x, a[1] - y
-        aa = dx * dx + dy * dy
-        if fx * fx + fy * fy <= radius * radius:
-            return sa
-        if aa <= EPS:
-            continue
-        bb = 2.0 * (fx * dx + fy * dy)
-        cc = fx * fx + fy * fy - radius * radius
-        discriminant = bb * bb - 4.0 * aa * cc
-        if discriminant < -EPS:
-            continue
-        root = (-bb - math.sqrt(max(0.0, discriminant))) / (2.0 * aa)
-        if -EPS <= root <= 1.0 + EPS:
-            root = max(0.0, min(1.0, root))
-            return sa + root * (sb - sa)
-    return None
-
-
-def obstacle_stop(perception, reference, settings):
+def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_m=None):
     """Return nearest conservative stop distance, or None for a clear path.
 
-    `reference` starts at the GPS rear-axle projection. Object rectangles are
-    enclosed by circles, then expanded by ego half-width. The front offset
-    and desired gap are removed from the first possible path intersection.
+    `reference` starts at the GPS rear-axle projection. The oriented target
+    is expanded laterally, then the front offset and decision's net gap are
+    removed once. Unknown orientation retains a conservative circle.
     """
     if not perception.targets:
         return None
@@ -109,15 +88,23 @@ def obstacle_stop(perception, reference, settings):
                                  + math.sin(heading) * target.vy)
         lateral_velocity = (-math.sin(heading) * target.vx
                             + math.cos(heading) * target.vy)
-        if (projection["s"] + envelope >= 0.0
-                and projection["s"] <= reference[-1][0] + envelope):
-            if longitudinal_velocity < -settings.motion_tolerance_mps:
-                raise ValueError("crossing or oncoming obstacle motion unsupported")
-            envelope += _lateral_drift(perception, target, projection,
-                                       lateral_velocity, settings)
-        entry = _entry_distance(reference, target.x, target.y, envelope)
+        drift_bound = abs(lateral_velocity) * max(settings.lateral_guard_time_s,
+                                                  perception.ego.speed/settings.deceleration)
+        padding = settings.half_width_m + settings.lateral_margin_m
+        # Filter only after bounding future lateral motion. A car wholly in
+        # another lane is harmless; one predicted to enter this path is not.
+        if footprint_entry(reference, target, padding + drift_bound) is None:
+            continue
+        if longitudinal_velocity < -settings.motion_tolerance_mps:
+            raise ValueError("crossing or oncoming obstacle motion unsupported")
+        padding += _lateral_drift(perception, target, projection,
+                                  lateral_velocity, settings)
+        entry = footprint_entry(reference, target, padding)
         if entry is None:
             continue
-        stop = max(0.0, entry - settings.front_offset_m - settings.obstacle_margin_m)
+        gap = settings.obstacle_margin_m if clearance_m is None else clearance_m
+        if clearances_m is not None:
+            gap = clearances_m.get(str(target.id), gap)
+        stop = max(0.0, entry - settings.front_offset_m - gap)
         nearest = stop if nearest is None else min(nearest, stop)
     return nearest

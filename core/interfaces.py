@@ -78,7 +78,7 @@ class Target(object):
         self.vx = 0.0
         self.vy = 0.0
         self.vz = 0.0
-        self.heading = 0.0
+        self.heading = None  # radians; absent orientation uses a bounding circle
         self.ax = 0.0
         self.ay = 0.0
         self.az = 0.0
@@ -155,6 +155,10 @@ class TrafficControl(object):
         self.ambiguous = False
         self.reason = "unavailable"
         self.observed = False
+        # Static lane association and dynamic read are independent facts.
+        self.association_valid = False
+        self.signal_presence = "unknown"  # unknown / absent / present
+        self.required = False  # applicable signal ahead, even if its read failed
         self.signal_distance = -1.0
         self.stop_line_distance = -1.0
         self.speed_limit = -1.0
@@ -225,6 +229,11 @@ class DecisionTarget(FrameOutput):
         self.target_speed = 0.0
         self.target_lane_id = ""
         self.stop_distance = -1.0
+        # Business net clearance; -1 lets a legacy producer use planner fallback.
+        self.obstacle_clearance_m = -1.0
+        # Canonical decimal ID strings keep JSON round trips lossless.
+        self.obstacle_clearances_m = {}
+        self.precision_stop = False
         self.reason = ""
         self.valid = False
 

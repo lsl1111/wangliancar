@@ -31,8 +31,17 @@ def validate_output(value, expected, source):
                                DecisionMode.STOP, DecisionMode.EMERGENCY_BRAKE)
                 or not number(value.target_speed) or value.target_speed < 0
                 or not number(value.stop_distance) or value.stop_distance < -1
+                or not number(value.obstacle_clearance_m)
+                or (value.obstacle_clearance_m < 0 and value.obstacle_clearance_m != -1)
+                or type(value.precision_stop) is not bool
+                or (value.precision_stop and value.stop_distance < 0)
                 or not isinstance(value.target_lane_id, str)):
             raise ValueError("invalid decision fields")
+        if (not isinstance(value.obstacle_clearances_m, dict)
+                or any(not isinstance(key, str) or not key.isdigit()
+                       or key != str(int(key)) or not number(gap) or gap < 0
+                       for key, gap in value.obstacle_clearances_m.items())):
+            raise ValueError("invalid per-target clearance")
     elif expected is Trajectory:
         if (not number(value.target_speed) or value.target_speed < 0
                 or len(value.points) < 2 or type(value.emergency_stop) is not bool
