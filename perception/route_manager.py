@@ -19,9 +19,10 @@ def _sdk_string(value):
 MAX_REFERENCE_POINTS = 20000
 FORWARD_HORIZON_M = 120.0  # Beyond the planner's 60 m horizon; never a goal.
 MAX_FORWARD_LANES = 32
-JOIN_POSITION_TOLERANCE_M = 0.1
+JOIN_POSITION_TOLERANCE_M = 0.2
+JOIN_HEIGHT_TOLERANCE_M = 0.1
 JOIN_HEADING_TOLERANCE_RAD = 0.35
-ROUTE_REFERENCE_VERSION = "successor-continuation-v1"
+ROUTE_REFERENCE_VERSION = "successor-continuation-v2"
 
 
 def _vector_points(vector):
@@ -55,10 +56,10 @@ def _heading(a, b):
     return math.atan2(b[1] - a[1], b[0] - a[0])
 
 
-def _connected_segment(reference, points):
+def _connected_segment(reference, points, diagnostics=None):
     """Orient at the join, not against the ego heading far before a curve.
 
-    Endpoints differing by at most map-rounding tolerance share the existing
+    Endpoints differing by at most map-sampling tolerance share the existing
     endpoint. No gap, junction chord or extrapolated lane is manufactured.
     """
     tail = reference[-1]
@@ -66,16 +67,26 @@ def _connected_segment(reference, points):
     candidates = []
     for segment, reversed_direction in ((points, False), (list(reversed(points)), True)):
         start = segment[0]
-        if (math.hypot(start[0] - tail[0], start[1] - tail[1]) > JOIN_POSITION_TOLERANCE_M
-                or abs(start[2] - tail[2]) > JOIN_POSITION_TOLERANCE_M):
+        gap = math.hypot(start[0] - tail[0], start[1] - tail[1])
+        height = abs(start[2] - tail[2])
+        detail = {"reversed": reversed_direction, "xy_gap_m": gap,
+                  "z_gap_m": height, "tail": tail, "start": start}
+        if diagnostics is not None:
+            diagnostics.append(detail)
+        if gap > JOIN_POSITION_TOLERANCE_M or height > JOIN_HEIGHT_TOLERANCE_M:
+            detail["reason"] = "position_or_height_gap"
             continue
         next_heading = _heading(start, segment[1])
         joined_heading = _heading(tail, segment[1])
+        deltas = [abs(normalize_angle(next_heading - previous_heading)),
+                  abs(normalize_angle(joined_heading - previous_heading)),
+                  abs(normalize_angle(joined_heading - next_heading))]
+        detail["heading_deltas_rad"] = deltas
         if (math.hypot(segment[1][0] - tail[0], segment[1][1] - tail[1]) <= 1e-6
-                or abs(normalize_angle(next_heading - previous_heading)) > JOIN_HEADING_TOLERANCE_RAD
-                or abs(normalize_angle(joined_heading - previous_heading)) > JOIN_HEADING_TOLERANCE_RAD
-                or abs(normalize_angle(joined_heading - next_heading)) > JOIN_HEADING_TOLERANCE_RAD):
+                or any(delta > JOIN_HEADING_TOLERANCE_RAD for delta in deltas)):
+            detail["reason"] = "degenerate_or_heading_discontinuity"
             continue
+        detail["reason"] = "connected"
         candidates.append((segment, reversed_direction))
     return candidates[0] if len(candidates) == 1 else None
 
@@ -120,6 +131,7 @@ class RouteManager(object):
         self.refresh_sec = refresh_sec
         self.last_update = 0.0
         self.last_lane = LaneContext()
+        self._join_failure_signature = None
 
     def update(self, ego, force=False):
         if not ego.valid or not self.adapter.map_loaded:
@@ -214,6 +226,9 @@ class RouteManager(object):
         reference = list(lane.center_line)
         lane.forward_reference = reference
         lane.forward_lane_ids = [lane.lane_id]
+        lane.forward_lane_spans = [{"lane_id": lane.lane_id,
+                                    "start_index": 0,
+                                    "end_index": len(reference) - 1}]
         lane.forward_reference_valid = True
         projection = project_polyline(reference, ego.x, ego.y)
         remaining = _length(reference) - projection["s"]
@@ -246,18 +261,27 @@ class RouteManager(object):
                     lane.forward_reference_status = "successor_unavailable"
                     return
                 points = _clean_points(_vector_points(sample.laneInfo.centerLine))
-                connection = _connected_segment(reference, points)
+                diagnostics = []
+                connection = _connected_segment(reference, points, diagnostics)
                 if connection is None:
                     lane.forward_reference_status = "disconnected_successor"
+                    signature = (lane.forward_lane_ids[-1], identity, repr(diagnostics))
+                    if signature != self._join_failure_signature:
+                        self.logger.warning("车道接续拒绝 from=%s to=%s checks=%s",
+                                            signature[0], identity, diagnostics)
+                        self._join_failure_signature = signature
                     return
                 points, reversed_direction = connection
                 if len(reference) + len(points) - 1 > MAX_REFERENCE_POINTS:
                     lane.forward_reference_status = "point_limit"
                     return
                 previous_end = reference[-1]
+                start_index = len(reference) - 1
                 reference.extend(points[1:])
                 remaining += _length([previous_end] + points[1:])
                 lane.forward_lane_ids.append(identity)
+                lane.forward_lane_spans.append({"lane_id": identity,
+                    "start_index": start_index, "end_index": len(reference) - 1})
                 visited.add(identity)
                 link_info = hdmap.getLaneLink(native) if hasattr(hdmap, "getLaneLink") else None
             except Exception as exc:
