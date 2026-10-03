@@ -10,6 +10,7 @@ from core.serialization import to_dict
 from members.decision.candidates import RouteContext
 from members.decision.engine import DecisionEngine
 from members.decision.settings import DecisionSettings
+from members.planning.lane_planner import PlannerSettings, build_trajectory
 from scripts.replay_decision import _assign
 from tests.test_decision import add_target, perception
 from tests.test_route_continuation import Map, ego, manager
@@ -52,8 +53,15 @@ class CurveRouteTargetTests(unittest.TestCase):
             before = self.observation(api)
         self.assertEqual(['a', 'b'], before.lane.forward_lane_ids)
         stopped = DecisionEngine(self.settings).run(before)
-        self.assertEqual(DecisionMode.STOP, stopped.mode)
-        self.assertIn('TARGET_UNKNOWN', stopped.reason)
+        # This distant target lies outside the disconnected known path. Keep
+        # the known map-end stopping boundary without an immediate standstill.
+        self.assertEqual(DecisionMode.KEEP_LANE, stopped.mode)
+        planned = build_trajectory(before, stopped,
+                                   PlannerSettings(front_offset_m=3.9187, half_width_m=.9))
+        self.assertTrue(planned.valid, planned.reason)
+        self.assertTrue(planned.stop_required)
+        self.assertGreater(planned.stop_distance, 0)
+        self.assertEqual(0, planned.points[-1].speed)
         after = self.observation()
         self.assertEqual(['a', 'b', 'c', 'd'], after.lane.forward_lane_ids)
         followed = DecisionEngine(self.settings).run(after)

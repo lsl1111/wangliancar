@@ -9,6 +9,9 @@ TARGET_SCENES = frozenset(
     + tuple(range(30, 42))
 )
 
+# Signal data is required until the map confirms no applicable lamp ahead.
+SIGNAL_SCENES = frozenset((10, 20, 37, 38))
+
 
 def requires_targets(scene_id):
     if type(scene_id) is not int or not 1 <= scene_id <= 41:

@@ -424,7 +424,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 # at the current-lane/curve boundary or during the bend.
                 self.assertEqual("safety_sent", pipeline["send"]["reason"])
                 self.assertLess(math.hypot(position[0] - terminal[0], position[1] - terminal[1]), 2.0)
-        self.assertEqual("successor-continuation-v2", pipeline["runtime"]["route_reference_version"])
+        self.assertEqual("successor-continuation-v3", pipeline["runtime"]["route_reference_version"])
         crossing = [(position, pipeline) for position, pipeline in zip(sdk.positions, sdk.pipelines)
                     if 18.5 <= position[0] <= 23.0 and position[1] < 1.0]
         self.assertTrue(crossing)

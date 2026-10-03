@@ -11,8 +11,9 @@ with targets can be marked valid.
 
 import math
 
-from core.geometry import project_polyline
+from core.geometry import project_polyline, polyline_prefix, swept_path_distance
 from core.route_segments import verified_spans
+from core.route_motion import lateral_residual
 from core.validation import number
 
 
@@ -52,6 +53,7 @@ def _route_association(perception, target):
     offset = sum(math.hypot(b[0]-a[0], b[1]-a[1])
                  for a, b in zip(points[:start+1], points[1:start+1]))
     local['s'] += offset - anchor['s']
+    local['index'] += start
     return local, width
 
 
@@ -152,8 +154,17 @@ def obstacle_stop(perception, reference, settings):
                                  + math.sin(heading) * target.vy)
         lateral_velocity = (-math.sin(heading) * target.vx
                             + math.cos(heading) * target.vy)
-        if (projection["s"] + envelope >= 0.0
-                and projection["s"] <= reference[-1][0] + envelope):
+        if association is not None:
+            residual = lateral_residual(perception.lane.forward_reference,
+                                        projection, target, route_width)
+            if residual is not None:
+                lateral_velocity = residual
+        guard_time = max(settings.lateral_guard_time_s, perception.ego.speed/settings.deceleration)
+        ahead = polyline_prefix(points, max(settings.horizon,
+            perception.ego.speed**2/(2*settings.deceleration) + settings.front_offset_m))
+        endpoint = (target.x+guard_time*target.vx, target.y+guard_time*target.vy)
+        intersects = swept_path_distance(ahead, (target.x,target.y), endpoint) <= envelope
+        if intersects:
             if longitudinal_velocity < -settings.motion_tolerance_mps:
                 raise ValueError("crossing or oncoming obstacle motion unsupported")
             envelope += _lateral_drift(perception, target, projection,

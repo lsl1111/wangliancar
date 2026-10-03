@@ -7,6 +7,8 @@ vehicle extent uncertainty remain explicit instead of becoming zero metres.
 
 import math
 from core.route_segments import verified_spans
+from core.route_motion import lateral_residual
+from core.geometry import project_polyline, swept_path_distance
 
 
 
@@ -184,6 +186,13 @@ def build_candidate(target, ego, perception, route, settings):
         heading = ego.heading
     candidate.lead_speed = math.cos(heading) * target.vx + math.sin(heading) * target.vy
     candidate.lateral_speed = -math.sin(heading) * target.vx + math.cos(heading) * target.vy
+    if projection is not None and candidate.relation in (CURRENT_LANE, FORWARD_ROUTE):
+        width = (lane.lane_width if candidate.relation == CURRENT_LANE and lane.lane_width_valid
+                 else getattr(target, 'lane_width_m', None))
+        if candidate.relation == CURRENT_LANE or target.lane_id in route.spans:
+            residual = lateral_residual(route.points, projection, target, width)
+            if residual is not None:
+                candidate.lateral_speed = residual
     candidate.static = math.hypot(target.vx, target.vy) <= settings.static_speed_threshold
     extent = None
     if (_finite(target.length) and _finite(target.width)
@@ -198,6 +207,16 @@ def build_candidate(target, ego, perception, route, settings):
                  _finite(lane.lane_width) and lane.lane_width > 0.0
                  else settings.projection_tolerance_m)
     corridor = lane_half + (extent if extent is not None else settings.min_gap)
+    if (candidate.relation not in (CURRENT_LANE, FORWARD_ROUTE)
+            and target.lane_id not in lane.successor_lane_ids):
+        # Failed bounded projection is not evidence of a collision. Evaluate
+        # whether this object's footprint/sweep can touch the known ahead road.
+        anchor = project_polyline(route.current, ego.x, ego.y)
+        ahead_points = [anchor['point']] + route.points[anchor['index']+1:]
+        endpoint = (target.x + target.vx*settings.conflict_horizon_s,
+                    target.y + target.vy*settings.conflict_horizon_s)
+        if swept_path_distance(ahead_points, (target.x,target.y), endpoint) > corridor:
+            return candidate
     if projection is None and ego_longitudinal < -corridor:
         return candidate
     entering = (candidate.lateral_speed is not None and

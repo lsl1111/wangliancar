@@ -192,11 +192,11 @@ class FrameworkTests(unittest.TestCase):
                          [item.mode for item in outputs])
         self.assertGreater(outputs[2].stop_distance, 0.0)
 
-    def test_one_clear_target_frame_does_not_release_conflict(self):
+    def test_safe_moving_lead_disappearance_does_not_request_a_stop(self):
         p = perception(speed=0.0, frame_id=1)
         add_target(p, longitudinal=30.0, speed=5.0)
         self.assertEqual(DecisionMode.FOLLOW, self.decide(p).mode)
-        self.assertEqual(DecisionMode.STOP,
+        self.assertEqual(DecisionMode.KEEP_LANE,
                          self.decide(perception(speed=0.0, frame_id=2)).mode)
         self.assertEqual(DecisionMode.KEEP_LANE,
                          self.decide(perception(speed=0.0, frame_id=3)).mode)

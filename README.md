@@ -4,6 +4,8 @@
 
 组员开始开发前，请先阅读 [四人协作开发说明](TEAM_COLLABORATION.md)。
 
+2026-10-03 修复分支补充弯道目标运动校验、接头归属恢复、任务点分叉选择及信号质量/停车约束，路线版本为 `successor-continuation-v3`。真实刹车帧的证据、公共字段及平台待验证范围见 [通用运动修正](perception/GENERAL_MOTION_FIXES.md)。
+
 ## 当前已经做到
 
 - 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS，并按场景传感器配置读取目标；目标传感器不可用时 Ground Truth 仅作诊断回退。

@@ -222,6 +222,9 @@ class DataChainTests(unittest.TestCase):
         p.traffic.observed = True
         p.traffic.signal_state = "RED"
         p.traffic.stop_line_distance = 20.0
+        p.traffic.valid = p.traffic.association_valid = True
+        p.source_status['traffic'] = {'usable': True, 'association_valid': True,
+                                      'quality': 'ok'}
         decision = decide(p)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertEqual(2.0, decision.target_speed)

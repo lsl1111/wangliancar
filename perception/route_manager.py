@@ -3,9 +3,11 @@
 import math
 import copy
 import time
+import heapq
 
 from core.geometry import nearest_path_error, normalize_angle, project_polyline
 from core.interfaces import LaneContext
+from core.route_segments import verified_spans
 
 
 def _sdk_string(value):
@@ -19,10 +21,11 @@ def _sdk_string(value):
 MAX_REFERENCE_POINTS = 20000
 FORWARD_HORIZON_M = 120.0  # Beyond the planner's 60 m horizon; never a goal.
 MAX_FORWARD_LANES = 32
+MAX_ROUTE_SEARCH_STATES = 128
 JOIN_POSITION_TOLERANCE_M = 0.2
 JOIN_HEIGHT_TOLERANCE_M = 0.1
 JOIN_HEADING_TOLERANCE_RAD = 0.35
-ROUTE_REFERENCE_VERSION = "successor-continuation-v2"
+ROUTE_REFERENCE_VERSION = "successor-continuation-v3"
 
 
 def _vector_points(vector):
@@ -132,6 +135,23 @@ class RouteManager(object):
         self.last_update = 0.0
         self.last_lane = LaneContext()
         self._join_failure_signature = None
+        self._route_hint = ()
+        self._route_context = None
+        self._route_choices = {}
+
+    def set_route_hint(self, points, valid, context=None):
+        """Static task waypoints select branches; they are not trajectory points."""
+        hint = ()
+        if valid and isinstance(points, (list,tuple)) and 2 <= len(points) <= 2000:
+            if all(isinstance(p,(list,tuple)) and len(p)>=2
+                   and all(type(v) in (int,float) and math.isfinite(v) for v in p[:2])
+                   for p in points):
+                hint = tuple(tuple(p[:2]) for p in points)
+        if hint != self._route_hint or context != self._route_context:
+            self._route_hint, self._route_context = hint, context
+            self._route_choices.clear()
+            self.last_lane = LaneContext()
+            self.last_update = 0.0
 
     def update(self, ego, force=False):
         if not ego.valid or not self.adapter.map_loaded:
@@ -169,8 +189,21 @@ class RouteManager(object):
         if not sample.exists:
             return lane
         points = _clean_points(_vector_points(sample.laneInfo.centerLine))
+        native_id = nearest.laneId
+        successor = self._ego_successor(ego, _sdk_string(native_id), points)
+        if successor is not None:
+            native_id, joined_points = successor
+            sample = hdmap.getLaneSample(native_id)
+            if not sample.exists:
+                return lane
+            lane.lane_id = _sdk_string(native_id)
+            points = _clean_points(_vector_points(sample.laneInfo.centerLine))
+        else:
+            joined_points = None
         lane.center_line = _orient_forward(points, ego.heading, ego.x, ego.y)
         reversed_direction = bool(points and lane.center_line and lane.center_line[0] != points[0])
+        if joined_points is not None:
+            lane.center_line = joined_points
         lane.left_boundary = _vector_points(sample.laneInfo.leftBoundary)
         lane.right_boundary = _vector_points(sample.laneInfo.rightBoundary)
         for name in ("left_boundary", "right_boundary"):
@@ -179,7 +212,7 @@ class RouteManager(object):
         link_info = None
         if hasattr(hdmap, "getLaneLink"):
             try:
-                link_info = hdmap.getLaneLink(nearest.laneId)
+                link_info = hdmap.getLaneLink(native_id)
             except Exception as exc:
                 self.logger.warning("车道连通查询失败: %s", exc)
             if link_info is not None and link_info.exists:
@@ -191,13 +224,13 @@ class RouteManager(object):
                     if vector is not None:
                         setattr(lane, name, [_sdk_string(vector.GetElement(i)) for i in range(vector.Size())])
         if hasattr(hdmap, "getLaneWidth"):
-            width_info = hdmap.getLaneWidth(nearest.laneId, position)
+            width_info = hdmap.getLaneWidth(native_id, position)
             if width_info.exists and math.isfinite(float(width_info.width)) and float(width_info.width) > 0.1:
                 lane.lane_width = float(width_info.width)
                 lane.lane_width_valid = True
         if hasattr(hdmap, "getRoadMark"):
             try:
-                mark_info = hdmap.getRoadMark(position, nearest.laneId)
+                mark_info = hdmap.getRoadMark(position, native_id)
                 if mark_info.exists:
                     lane.left_mark_type = _sdk_string(mark_info.left.type)
                     lane.right_mark_type = _sdk_string(mark_info.right.type)
@@ -216,6 +249,46 @@ class RouteManager(object):
         if lane.valid:
             self._extend_reference(lane, ego, link_info, reversed_direction)
         return lane
+
+    def _ego_successor(self, ego, nearest_id, native_points):
+        """Promote only a previously verified successor at a delayed SDK join.
+
+        Keep the shared endpoint used by the verified reference. Otherwise a
+        rounded native start can place the ego before its new lane again.
+        """
+        lane, hdmap = self.last_lane, self.adapter.hdmap
+        if (not lane.valid or not lane.forward_reference_valid
+                or nearest_id != lane.lane_id or not hasattr(hdmap, 'pySimString')):
+            return None
+        old = project_polyline(lane.center_line, ego.x, ego.y)
+        native = project_polyline(_orient_forward(native_points, ego.heading, ego.x, ego.y),
+                                  ego.x, ego.y)
+        if (old is None or native is None or old['index'] != len(lane.center_line)-2
+                or old['raw_ratio'] <= 1 or native['raw_ratio'] <= 1):
+            return None
+        spans = verified_spans(len(lane.center_line), len(lane.forward_reference),
+                               lane.forward_lane_ids, lane.forward_lane_spans)
+        candidates = []
+        for identity, (start, end) in spans.items():
+            if len(lane.forward_lane_ids) < 2 or identity != lane.forward_lane_ids[1]:
+                continue
+            points = lane.forward_reference[start:end+1]
+            p = project_polyline(points, ego.x, ego.y)
+            if (p is None or not 0 <= p['raw_ratio'] <= 1
+                    or abs(normalize_angle(ego.heading-p['heading'])) > JOIN_HEADING_TOLERANCE_RAD):
+                continue
+            native_id = hdmap.pySimString(identity)
+            width = hdmap.getLaneWidth(native_id, hdmap.pySimPoint3D(ego.x, ego.y, ego.z))
+            i, r = p['index'], p['ratio']
+            z = points[i][2] + r*(points[i+1][2]-points[i][2])
+            if (width.exists and math.isfinite(width.width) and width.width > 0
+                    and p['distance'] <= width.width*.5
+                    and abs(ego.z-z) <= JOIN_HEIGHT_TOLERANCE_M):
+                candidates.append((p['distance'], native_id, points))
+        candidates.sort(key=lambda value:value[0])
+        if not candidates or (len(candidates)>1 and candidates[1][0]-candidates[0][0] <= 1e-3):
+            return None
+        return candidates[0][1:]
 
     def _extend_reference(self, lane, ego, link_info, reversed_direction):
         """Bounded map expansion; only a unique, connected forward lane is used.
@@ -247,8 +320,11 @@ class RouteManager(object):
                     lane.forward_reference_status = "lookahead_limit"
                     return
                 if len(links) != 1:
-                    lane.forward_reference_status = "ambiguous_successor"
-                    return
+                    selection = self._select_successor(reference, links, lane, ego)
+                    if selection is None:
+                        lane.forward_reference_status = "ambiguous_successor"
+                        return
+                    links = [selection]
                 identity, native = links[0]
                 if identity in visited:
                     lane.forward_reference_status = "cycle"
@@ -291,6 +367,93 @@ class RouteManager(object):
                 self.logger.warning("前方车道接续查询失败: %s", exc)
                 return
 
+    def _select_successor(self, reference, links, lane, ego):
+        """Shortest verified continuation to the next off-current-lane waypoint.
+
+        All graph edges pass the same position/height/direction checks as normal
+        continuation. A bounded, incomplete search or effectively equal choices
+        stays unresolved; a heading or Euclidean-nearest guess cannot select it.
+        """
+        if not self._route_hint or not hasattr(self.adapter.hdmap, 'getLaneWidth'):
+            return None
+        progress = project_polyline(self._route_hint, ego.x, ego.y)
+        remaining = self._route_hint[progress['index']+1:] if progress else self._route_hint[-1:]
+        goal = None
+        for point in remaining:
+            on_current = project_polyline(lane.center_line, point[0], point[1])
+            if (on_current is None or not 0 <= on_current['raw_ratio'] <= 1
+                    or not lane.lane_width_valid or on_current['distance'] > lane.lane_width*.5):
+                goal = point
+                break
+        if goal is None:
+            return None
+        key = (lane.forward_lane_ids[-1], tuple(identity for identity,native in links), goal)
+        cached = self._route_choices.get(key)
+        if cached is not None:
+            return next((link for link in links if link[0] == cached), None)
+        hdmap, queue, sequence = self.adapter.hdmap, [], 0
+        def enqueue(identity, native, anchor, cost, first, visited):
+            sample = hdmap.getLaneSample(native)
+            if not sample.exists:
+                raise ValueError('competitive route branch sample unavailable')
+            connection = _connected_segment(anchor,_clean_points(_vector_points(sample.laneInfo.centerLine)))
+            if connection is None:
+                return
+            points, reverse = connection
+            points = [anchor[-1]] + points[1:]
+            heapq.heappush(queue,(cost,sequence,identity,native,points,reverse,first,visited))
+        try:
+            for identity,native in links:
+                enqueue(identity,native,reference,0.0,identity,frozenset(lane.forward_lane_ids+[identity]))
+                sequence += 1
+            solutions, expanded, best_cost = [], 0, float('inf')
+            seen = {}
+            while queue:
+                cost, unused, identity,native,points,reverse,first,visited = heapq.heappop(queue)
+                if cost > best_cost + JOIN_POSITION_TOLERANCE_M:
+                    break
+                expanded += 1
+                if expanded > MAX_ROUTE_SEARCH_STATES:
+                    return None
+                state = (identity,reverse,first)
+                if cost > seen.get(state,float('inf')) + 1e-6:
+                    continue
+                seen[state] = cost
+                projected = project_polyline(points,goal[0],goal[1])
+                if projected is not None and -1e-6 <= projected['raw_ratio'] <= 1+1e-6:
+                    i,r = projected['index'],projected['ratio']
+                    z = points[i][2]+r*(points[i+1][2]-points[i][2])
+                    width = hdmap.getLaneWidth(native,hdmap.pySimPoint3D(goal[0],goal[1],z))
+                    if (width.exists and math.isfinite(width.width) and width.width>0
+                            and projected['distance'] <= width.width*.5):
+                        reached = cost+projected['s']
+                        solutions.append((reached,first))
+                        best_cost = min(best_cost,reached)
+                        continue
+                successors = _forward_links(hdmap.getLaneLink(native),reverse)
+                if successors is None:
+                    # An unreadable competitive branch cannot be ruled out.
+                    return None
+                if successors and len(visited)>=MAX_FORWARD_LANES:
+                    return None
+                for next_id,next_native in successors:
+                    if next_id not in visited:
+                        enqueue(next_id,next_native,points,cost+_length(points),first,visited|{next_id})
+                        sequence += 1
+            if not solutions:
+                return None
+            choices = {first for cost,first in solutions if cost<=best_cost+JOIN_POSITION_TOLERANCE_M}
+            if len(choices)!=1:
+                return None
+            selected = choices.pop()
+            self._route_choices[key] = selected
+            if hasattr(self.logger,'info'):
+                self.logger.info("任务路径选择后继 from=%s to=%s goal=%s",key[0],selected,goal)
+            return next(link for link in links if link[0]==selected)
+        except (AttributeError,TypeError,ValueError,RuntimeError) as exc:
+            self.logger.warning("任务路线分叉查询失败: %s",exc)
+            return None
+
     def locate_target(self, target):
         """Map membership requires bounded projection and a measured lane width."""
         target.lane_width_m = None
@@ -312,7 +475,7 @@ class RouteManager(object):
             projection = project_polyline(points, target.x, target.y)
             if (projection is None or not 0 <= projection["raw_ratio"] <= 1 or
                     projection["distance"] > width.width * 0.5):
-                return "", False
+                return self._locate_on_verified_reference(target, pos)
             i, r = projection["index"], projection["ratio"]
             road_z = points[i][2] + r * (points[i + 1][2] - points[i][2])
             if abs(target.z - road_z) > max(2.0, target.height):
@@ -321,3 +484,35 @@ class RouteManager(object):
             return _sdk_string(nearest.laneId), True
         except (AttributeError, TypeError, ValueError, RuntimeError):
             return "", False
+
+    def _locate_on_verified_reference(self, target, position):
+        """Handle nearest-lane endpoint ambiguity using verified joined spans.
+
+        Width is queried for the candidate lane at this target position. The
+        joined geometry is already bounded and height checked; no extrapolated
+        membership or arbitrary neighbouring lane is manufactured.
+        """
+        lane, hdmap = self.last_lane, self.adapter.hdmap
+        if not lane.valid or not lane.forward_reference_valid or not hasattr(hdmap, 'pySimString'):
+            return "", False
+        spans = verified_spans(len(lane.center_line), len(lane.forward_reference),
+                               lane.forward_lane_ids, lane.forward_lane_spans)
+        candidates = []
+        for identity, (start, end) in spans.items():
+            points = lane.forward_reference[start:end+1]
+            projection = project_polyline(points, target.x, target.y)
+            if projection is None or not 0 <= projection['raw_ratio'] <= 1:
+                continue
+            width = hdmap.getLaneWidth(hdmap.pySimString(identity), position)
+            if (not width.exists or not math.isfinite(width.width) or width.width <= 0
+                    or projection['distance'] > width.width*.5):
+                continue
+            i, ratio = projection['index'], projection['ratio']
+            road_z = points[i][2] + ratio*(points[i+1][2]-points[i][2])
+            if abs(target.z-road_z) <= max(2.0, target.height):
+                candidates.append((projection['distance'], identity, float(width.width)))
+        candidates.sort()
+        if not candidates or (len(candidates)>1 and candidates[1][0]-candidates[0][0] <= 1e-3):
+            return "", False
+        target.lane_width_m = candidates[0][2]
+        return candidates[0][1], True

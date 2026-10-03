@@ -78,7 +78,7 @@ class Target(object):
         self.vx = 0.0
         self.vy = 0.0
         self.vz = 0.0
-        self.heading = 0.0
+        self.heading = None  # Unknown target orientation keeps the circular bound.
         self.ax = 0.0
         self.ay = 0.0
         self.az = 0.0
@@ -162,6 +162,9 @@ class TrafficControl(object):
         self.ambiguous = False
         self.reason = "unavailable"
         self.observed = False
+        self.association_valid = False
+        self.signal_presence = "unknown"
+        self.required = False
         self.signal_distance = -1.0
         self.stop_line_distance = -1.0
         self.speed_limit = -1.0

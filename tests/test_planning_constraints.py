@@ -33,6 +33,7 @@ def limit(p, distance, speed, **overrides):
 
 def verified_target(p, **overrides):
     target = fixtures.sensor_target(p, **overrides)
+    target.heading = 0.0
     target.same_lane_valid, target.lane_id = True, p.lane.lane_id
     p.lane.lane_width_valid, p.lane.lane_width = True, 3.5
     return target
@@ -76,7 +77,7 @@ class PlanningConstraintTests(unittest.TestCase):
 
     def test_lateral_guard_covers_current_braking_time(self):
         p, d = fixtures.scene(8.0, 8.0)
-        verified_target(p, x=80.0, y=0.6, vx=8.0, vy=0.04)
+        verified_target(p, x=50.0, y=0.6, vx=8.0, vy=0.04)
         # Three seconds would fit (0.72 m); braking takes four, reaching 0.76 m.
         result = build_trajectory(p, d, settings())
         self.assertFalse(result.valid)
@@ -222,6 +223,42 @@ class PlanningConstraintTests(unittest.TestCase):
         self.assertTrue(control.valid, control.errors)
         self.assertGreater(control.throttle, 0.0)
         self.assertEqual(0.0, control.brake)
+
+    def curve_scene(self, speed):
+        radius = 30.
+        p, d = fixtures.scene(speed, 8.)
+        p.lane.center_line = [(radius*math.sin(i*.02), radius*(1-math.cos(i*.02)))
+                              for i in range(151)]
+        p.ego.heading = .01
+        p.ego.vx, p.ego.vy = speed*math.cos(.01), speed*math.sin(.01)
+        return p, d
+
+    def test_small_curve_overspeed_recovers_by_bounded_braking_without_stop_latch(self):
+        config = settings()
+        p, d = self.curve_scene(6.8)
+        result = build_trajectory(p, d, config)
+        self.assert_profile(result, d, config)
+        self.assertFalse(result.emergency_stop)
+        self.assertIn('bounded curve-speed recovery', result.reason)
+        self.assertLess(result.points[1].speed, p.ego.speed)
+        cap = math.sqrt(1.5*30*math.sin(.01)/.01)
+        self.assertTrue(all(point.speed <= cap+1e-6 for point in result.points
+                            if point.relative_time >= config.curve_recovery_time_s))
+
+    def test_curve_recovery_cannot_relax_large_overspeed_stop_or_published_limit(self):
+        for change in ('large', 'stop', 'sign'):
+            p, d = self.curve_scene(8 if change == 'large' else 6.8)
+            if change == 'stop': d.stop_distance = 5
+            if change == 'sign': limit(p, 3.9187 + .01, 6.)
+            result = build_trajectory(p, d, settings())
+            self.assertTrue(result.valid, result.reason)
+            self.assertTrue(result.emergency_stop, change)
+
+    def test_unknown_body_heading_cannot_use_verified_lane_lateral_exception(self):
+        p, d = fixtures.scene(2, 5)
+        target = verified_target(p, vx=5, vy=.01)
+        target.heading = None
+        self.assertFalse(build_trajectory(p, d, settings()).valid)
 
 
 if __name__ == "__main__":
