@@ -8,10 +8,11 @@ See BASELINE.md for the output contract and integration gates.
 import math
 import os
 
-from core.geometry import normalize_angle, project_polyline
+from core.geometry import normalize_angle, project_polyline, opposes_direction
 from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory, TrajectoryPoint
 from core.validation import current, number, validate_output
 from core.scene_requirements import requires_targets
+from core.traffic_quality import traffic_required, traffic_usable, bounded_signal_stop
 from members.planning.obstacle_guard import obstacle_stop
 from members.planning.speed_constraints import upcoming_limits, speed_caps
 
@@ -26,7 +27,8 @@ class PlannerSettings(object):
                  max_corner_angle=0.35, hold_time=0.1,
                  front_offset_m=None, half_width_m=None,
                  obstacle_margin_m=4.0, lateral_margin_m=0.0,
-                 motion_tolerance_mps=0.0, lateral_guard_time_s=3.0):
+                 motion_tolerance_mps=0.0, lateral_guard_time_s=3.0,
+                 curve_recovery_time_s=0.2):
         self.spacing = spacing
         self.horizon = horizon
         self.acceleration = acceleration
@@ -42,6 +44,7 @@ class PlannerSettings(object):
         self.lateral_margin_m = lateral_margin_m
         self.motion_tolerance_mps = motion_tolerance_mps
         self.lateral_guard_time_s = lateral_guard_time_s
+        self.curve_recovery_time_s = curve_recovery_time_s
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -75,6 +78,8 @@ class PlannerSettings(object):
             raise ValueError("requested sample budget exceeds 2000 points")
         if self.max_heading_error >= math.pi / 2 or self.max_corner_angle >= math.pi / 2:
             raise ValueError("forward-only angle limits must be below pi/2")
+        if self.curve_recovery_time_s > 0.5:
+            raise ValueError('curve recovery must remain within 0.5 seconds')
 
 
 def _clean_reference(raw):
@@ -215,14 +220,24 @@ def _curve_limits(samples, settings, geometry=None):
 
 
 def _speed_profile(samples, curve_limits, initial, desired, stop, settings,
-                   external_limits=None):
+                   external_limits=None, curve_recovery=False):
     caps = []
     external_limits = (external_limits if external_limits is not None
                        else [float("inf")] * len(samples))
+    recovery_distance = max(0.0, initial * settings.curve_recovery_time_s
+                            - .5 * settings.deceleration * settings.curve_recovery_time_s**2)
+    if curve_recovery and (initial > curve_limits[0] +
+                           settings.deceleration * settings.curve_recovery_time_s):
+        return None
     for (s, _), curve, external in zip(samples, curve_limits, external_limits):
         # When overspeeding, request bounded braking instead of jumping to target.
         demand = max(desired, math.sqrt(max(0.0, initial ** 2 - 2 * settings.deceleration * s)))
         stop_cap = math.sqrt(max(0.0, 2 * settings.deceleration * (stop - s)))
+        if curve_recovery and s < recovery_distance - EPS:
+            # The measured speed already violates the provisional curve cap.
+            # Brake at the configured rate for a short recovery window; never
+            # relax a stop boundary or a published speed-limit constraint.
+            curve = max(curve, math.sqrt(max(0.0, initial**2-2*settings.deceleration*s)))
         caps.append(min(demand, stop_cap, curve, external))
     for i in range(len(caps) - 2, -1, -1):
         ds = samples[i + 1][0] - samples[i][0]
@@ -288,7 +303,7 @@ def _moving_reference(output, perception, decision, settings):
     # GPS gear is a raw gearbox position, not the driver's command enum.
     # Determine actual reverse motion from the signed longitudinal velocity.
     if (number(ego.vx) and number(ego.vy) and
-            ego.vx * math.cos(ego.heading) + ego.vy * math.sin(ego.heading) < -EPS):
+            opposes_direction(ego.vx, ego.vy, ego.heading, ego.speed)):
         raise ValueError("reverse trajectory unsupported")
     if decision.mode == DecisionMode.STOP and decision.stop_distance < 0:
         _hold(output, ego, ego.speed > EPS,
@@ -301,6 +316,9 @@ def _moving_reference(output, perception, decision, settings):
         return
     if lane.valid is not True:
         raise ValueError("map lane unavailable")
+    if (traffic_required(perception) and not traffic_usable(perception)
+            and not bounded_signal_stop(perception, decision)):
+        raise ValueError('applicable signal unavailable without a verified stop-line request')
     # Keep source and geometry gates before applying any motion envelope.
     status = perception.source_status.get("targets", {})
     optional_unavailable = (not requires_targets(perception.scene_id)
@@ -339,12 +357,23 @@ def _moving_reference(output, perception, decision, settings):
         return
     limits = upcoming_limits(perception, settings)
     horizon = min(settings.horizon, stop)
+    recovery_distance = max(0.0, ego.speed * settings.curve_recovery_time_s
+                            - .5 * settings.deceleration * settings.curve_recovery_time_s**2)
     samples = _sample(reference, horizon, settings.spacing,
                       anchors=[distance for distance, _ in limits])
     headings, curve_limits = _curve_limits(samples, settings, geometry)
     desired = ego.speed if decision.mode == DecisionMode.STOP else decision.target_speed
     speeds = _speed_profile(samples, curve_limits, ego.speed, desired, stop, settings,
                             speed_caps(samples, limits, settings.deceleration))
+    recovering_curve = False
+    if speeds is None:
+        samples = _sample(reference, horizon, settings.spacing,
+                          anchors=[distance for distance, _ in limits] + [recovery_distance])
+        headings, curve_limits = _curve_limits(samples, settings, geometry)
+        speeds = _speed_profile(samples, curve_limits, ego.speed, desired, stop, settings,
+                                speed_caps(samples, limits, settings.deceleration),
+                                curve_recovery=True)
+        recovering_curve = speeds is not None
     if speeds is None:
         _hold(output, ego, True,
               "braking, curve or speed-limit constraint infeasible; controller must brake",
@@ -372,3 +401,6 @@ def _moving_reference(output, perception, decision, settings):
         output.reason += "; forward reference: " + lane.forward_reference_status
     if limits:
         output.reason += "; upcoming speed limits applied: {0}".format(len(limits))
+    if recovering_curve:
+        output.reason += '; bounded curve-speed recovery within {0:.2f}s'.format(
+            settings.curve_recovery_time_s)

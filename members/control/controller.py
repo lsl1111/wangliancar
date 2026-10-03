@@ -8,7 +8,7 @@ import math
 import time
 
 from core.interfaces import ControlOut, Trajectory
-from core.geometry import normalize_angle
+from core.geometry import normalize_angle, opposes_direction
 from core.validation import current, validate_output
 from members.control.lateral import geometry_request, steering_request
 from members.control.longitudinal import pedal_request, applied_integral
@@ -205,7 +205,8 @@ class ControlEngine(object):
                                             self.standstill.parking_brake)
             if (direction == self.direction.last_direction and
                     self.direction.pending_direction is None and
-                    direction * signed_speed < -1e-6):
+                    opposes_direction(ego.vx, ego.vy, ego.heading, ego.speed, direction,
+                                      self.settings.gear_standstill_speed_mps)):
                 raise ValueError("reverse or invalid velocity opposes requested motion")
             output.gear = 1 if direction == 1 else 2
             output.diagnostics["observed_gear"] = ego.gear
@@ -231,7 +232,8 @@ class ControlEngine(object):
             gear_stage = self.direction.update(direction, ego.speed, now, self.settings)
             if gear_stage is not None:
                 return self._braking_output(output, ego, gear_stage[0], gear_stage[1])
-            if direction * signed_speed < -1e-6:
+            if opposes_direction(ego.vx, ego.vy, ego.heading, ego.speed, direction,
+                                  self.settings.gear_standstill_speed_mps):
                 raise ValueError("velocity opposes engaged trajectory direction")
 
             path = PreparedPath(trajectory.points, self.settings.max_segment_m,

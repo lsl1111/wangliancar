@@ -226,8 +226,19 @@ class P0HandoffTests(unittest.TestCase):
             p.scene_id = 10
             p.traffic = built.traffic
             p.source_status["traffic"] = built.source_status["traffic"]
-            d, _ = self.chain(p)
-            self.assertEqual(not ok, d.target_speed == 0)
+            d, t = self.chain(p)
+            self.assertGreater(d.target_speed, 0)
+            if ok:
+                self.assertLess(d.stop_distance, 0)
+            else:
+                # Static association is known; failed colour reads permit
+                # a bounded approach, never crossing on the previous green.
+                self.assertIn("STOP_TRAFFIC", d.reason)
+                self.assertGreater(d.stop_distance, 0)
+                self.assertLessEqual(d.stop_distance, 25-self.settings.front_offset_m)
+                self.assertTrue(t.stop_required)
+                self.assertLessEqual(t.stop_distance, d.stop_distance)
+                self.assertFalse(SafetySupervisor(SimpleNamespace()).evaluate(p, d, t).active)
 
     def test_builder_confirmed_absence_and_behind_failed_lamp_are_optional(self):
         class Adapter(FakeAdapter):

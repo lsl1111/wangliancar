@@ -3,7 +3,7 @@
 Only forward, approximately path-aligned traffic is supported. A moving
 object is treated as if it could stop at its current position; that is a
 conservative bound for a forward lead, not a prediction of its future path.
-Small lateral motion needs verified current-lane geometry and an expanded
+Small lateral motion needs verified route-lane geometry and an expanded
 envelope; it is not silently discarded as sensor noise.
 Vehicle dimensions must be supplied explicitly before a moving trajectory
 with targets can be marked valid.
@@ -11,16 +11,55 @@ with targets can be marked valid.
 
 import math
 
-from core.geometry import project_polyline
-from core.obstacle_geometry import footprint_entry
+from core.geometry import project_polyline, polyline_prefix
+from core.route_segments import verified_spans
+from core.route_motion import lateral_residual
+from core.obstacle_geometry import footprint_entry, swept_footprint_intersects
 from core.validation import number
 
 
 EPS = 1e-9
 
 
-def _lateral_drift(perception, target, projection, velocity, settings):
-    """Bound constant lateral drift within a verified current-lane corridor.
+def _route_association(perception, target):
+    """A mapped successor uses its own segment tangent and measured width."""
+    lane = perception.lane
+    if target.same_lane_valid is not True or lane.forward_reference_valid is not True:
+        return None
+    current, forward = lane.center_line, lane.forward_reference
+    if (not isinstance(current, (list, tuple)) or not isinstance(forward, (list, tuple))
+            or len(current) < 2 or len(forward) < len(current)
+            or [tuple(p[:2]) for p in forward[:len(current)]] != [tuple(p[:2]) for p in current]
+            or not lane.forward_lane_ids or lane.forward_lane_ids[0] != lane.lane_id):
+        return None
+    points = [tuple(p[:2]) for p in forward]
+    if (not all(len(p) == 2 and all(number(v) for v in p) for p in points)
+            or any(math.hypot(b[0]-a[0], b[1]-a[1]) <= 1e-6
+                   for a, b in zip(points, points[1:]))):
+        return None
+    spans = verified_spans(len(current), len(forward), lane.forward_lane_ids,
+                           getattr(lane, 'forward_lane_spans', []))
+    if target.lane_id not in spans:
+        return None
+    width = (lane.lane_width if target.lane_id == lane.lane_id and lane.lane_width_valid
+             else getattr(target, 'lane_width_m', None))
+    if not number(width) or width <= 0.1:
+        return None
+    start, end = spans[target.lane_id]
+    local = project_polyline(points[start:end+1], target.x, target.y)
+    anchor = project_polyline(points[:len(current)], perception.ego.x, perception.ego.y)
+    if (local is None or anchor is None or not 0 <= local['raw_ratio'] <= 1
+            or local['distance'] > width * 0.5):
+        return None
+    offset = sum(math.hypot(b[0]-a[0], b[1]-a[1])
+                 for a, b in zip(points[:start+1], points[1:start+1]))
+    local['s'] += offset - anchor['s']
+    local['index'] += start
+    return local, width
+
+
+def _lateral_drift(perception, target, projection, velocity, settings, route_width=None):
+    """Bound constant lateral drift within a verified route-lane corridor.
 
     This local assumption does not model a future lane change or acceleration.
     Require at least the trial observation window and current braking time.
@@ -37,15 +76,17 @@ def _lateral_drift(perception, target, projection, velocity, settings):
     if abs(velocity) <= settings.motion_tolerance_mps:
         return drift
     lane = perception.lane
-    if (target.same_lane_valid is not True or target.lane_id != lane.lane_id
-            or lane.lane_width_valid is not True or not number(lane.lane_width)
-            or lane.lane_width <= 0 or not number(target.heading)
+    width = route_width
+    if width is None and (target.same_lane_valid is True and target.lane_id == lane.lane_id
+                          and lane.lane_width_valid is True):
+        width = lane.lane_width
+    if (not number(width) or width <= 0 or not number(target.heading)
             or not 0.0 <= projection["raw_ratio"] <= 1.0):
         raise ValueError("crossing or oncoming obstacle motion unsupported")
     angle = target.heading - projection["heading"]
     lateral_extent = 0.5 * (target.length * abs(math.sin(angle))
                             + target.width * abs(math.cos(angle)))
-    clearance = lane.lane_width * 0.5 - lateral_extent - settings.lateral_margin_m
+    clearance = width * 0.5 - lateral_extent - settings.lateral_margin_m
     if clearance <= 0 or projection["distance"] + drift > clearance:
         raise ValueError("crossing or oncoming obstacle motion unsupported")
     return drift
@@ -83,22 +124,36 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
         projection = project_polyline(points, target.x, target.y)
         if projection is None:
             raise ValueError("obstacle projection unavailable")
+        association = _route_association(perception, target)
+        route_width = None
+        if association is not None:
+            projection, route_width = association
         heading = projection["heading"]
         longitudinal_velocity = (math.cos(heading) * target.vx
                                  + math.sin(heading) * target.vy)
         lateral_velocity = (-math.sin(heading) * target.vx
                             + math.cos(heading) * target.vy)
-        drift_bound = abs(lateral_velocity) * max(settings.lateral_guard_time_s,
-                                                  perception.ego.speed/settings.deceleration)
+        if association is not None:
+            residual = lateral_residual(perception.lane.forward_reference,
+                                        projection, target, route_width)
+            if residual is not None:
+                lateral_velocity = residual
+        guard_time = max(settings.lateral_guard_time_s,
+                         perception.ego.speed / settings.deceleration)
+        ahead = polyline_prefix(points, max(settings.horizon,
+            perception.ego.speed**2 / (2*settings.deceleration) + settings.front_offset_m))
+        ahead_reference = [(0.0, ahead[0])]
+        for a, b in zip(ahead, ahead[1:]):
+            ahead_reference.append((ahead_reference[-1][0] +
+                                    math.hypot(b[0]-a[0], b[1]-a[1]), b))
         padding = settings.half_width_m + settings.lateral_margin_m
-        # Filter only after bounding future lateral motion. A car wholly in
-        # another lane is harmless; one predicted to enter this path is not.
-        if footprint_entry(reference, target, padding + drift_bound) is None:
-            continue
-        if longitudinal_velocity < -settings.motion_tolerance_mps:
-            raise ValueError("crossing or oncoming obstacle motion unsupported")
-        padding += _lateral_drift(perception, target, projection,
-                                  lateral_velocity, settings)
+        intersects = swept_footprint_intersects(ahead_reference, target, padding,
+                                                guard_time)
+        if intersects:
+            if longitudinal_velocity < -settings.motion_tolerance_mps:
+                raise ValueError("crossing or oncoming obstacle motion unsupported")
+            padding += _lateral_drift(perception, target, projection,
+                                       lateral_velocity, settings, route_width)
         entry = footprint_entry(reference, target, padding)
         if entry is None:
             continue

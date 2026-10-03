@@ -131,9 +131,9 @@ class PerceptionTests(unittest.TestCase):
         self.builder.adapter = Lights()
         value = self.builder.build_from_raw({"gps": self._gps(), "targets": []})
         self.assertEqual("UNKNOWN", value.traffic.signal_state)
-        self.assertTrue(value.traffic.required)
         self.assertFalse(value.traffic.valid)
-        self.assertAlmostEqual(38.0, value.traffic.stop_line_distance)
+        self.assertTrue(value.traffic.required)
+        self.assertEqual(-1.0, value.traffic.stop_line_distance)
         self.assertIn("TRAFFIC_RECORD_INVALID", value.errors)
 
     def test_missing_light_coordinates_do_not_crash(self):

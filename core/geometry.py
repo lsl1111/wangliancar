@@ -17,6 +17,17 @@ def speed_2d(vx, vy):
     return math.hypot(vx, vy)
 
 
+def opposes_direction(vx, vy, heading, speed, direction=1, standstill_mps=0.05):
+    """Do not classify bounded standstill rollback as an opposite manoeuvre.
+
+    The default matches the existing control gear-standstill criterion. A
+    nonzero reported speed or vector speed above that criterion still requires
+    directional agreement; this does not authorize driving against real motion.
+    """
+    signed = direction * (vx * math.cos(heading) + vy * math.sin(heading))
+    return signed < -1e-6 and max(speed, math.hypot(vx, vy)) > standstill_mps
+
+
 def project_polyline(points, x, y):
     """Nearest bounded segment projection; no extrapolation past map coverage."""
     best, along = None, 0.0
@@ -37,6 +48,48 @@ def project_polyline(points, x, y):
                     "point": (px, py), "heading": math.atan2(dy, dx)}
         along += length
     return best
+
+
+def polyline_prefix(points, distance):
+    """A bounded ahead path, including the exact end of the requested range."""
+    result = [points[0][:2]] if points else []
+    for a, b in zip(points, points[1:]):
+        length = math.hypot(b[0]-a[0], b[1]-a[1])
+        if length <= 1e-6:
+            continue
+        if distance <= length:
+            ratio = max(0.0, distance / length)
+            result.append((a[0]+ratio*(b[0]-a[0]), a[1]+ratio*(b[1]-a[1])))
+            break
+        result.append(b[:2])
+        distance -= length
+    return result
+
+
+def swept_path_distance(points, start, end):
+    """Minimum distance from a constant-velocity segment to a polyline.
+
+    Check segment interiors as well as endpoints so a crossing between
+    observations is retained. Callers expand by vehicle/target footprints.
+    """
+    def point_segment(p, a, b):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        square = dx*dx + dy*dy
+        ratio = clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/square, 0, 1) if square > 1e-12 else 0
+        return math.hypot(p[0]-a[0]-ratio*dx, p[1]-a[1]-ratio*dy)
+    nearest = float('inf')
+    ux, uy = end[0]-start[0], end[1]-start[1]
+    for a, b in zip(points, points[1:]):
+        vx, vy = b[0]-a[0], b[1]-a[1]
+        determinant = ux*vy-uy*vx
+        if abs(determinant) > 1e-12:
+            dx, dy = a[0]-start[0], a[1]-start[1]
+            first, second = (dx*vy-dy*vx)/determinant, (dx*uy-dy*ux)/determinant
+            if 0 <= first <= 1 and 0 <= second <= 1:
+                return 0.0
+        nearest = min(nearest, point_segment(start,a,b), point_segment(end,a,b),
+                      point_segment(a,start,end), point_segment(b,start,end))
+    return nearest
 
 
 def world_to_ego(ego_x, ego_y, heading, target_x, target_y):

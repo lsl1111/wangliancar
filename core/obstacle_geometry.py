@@ -1,7 +1,9 @@
 """Shared world-metre footprint calculations, independent of the SDK."""
 
+import copy
 import math
 
+from core.geometry import swept_path_distance
 from core.validation import number
 
 
@@ -48,6 +50,28 @@ def footprint_entry(reference, target, lateral_padding):
         if lo <= hi + 1e-9:
             return sa + max(0.0, lo)*(sb-sa)
     return None
+
+
+def swept_footprint_intersects(reference, target, lateral_padding, seconds):
+    """Path contact with a fixed-heading linear sweep, including its interior.
+
+    This only selects relevant motion checks. Actual stopping still uses the
+    observed footprint rather than assuming the target's future position.
+    """
+    dx, dy = target.vx * seconds, target.vy * seconds
+    if not all(number(v) for v in (dx, dy)):
+        raise ValueError("nonfinite obstacle motion sweep")
+    swept = copy.copy(target)
+    swept.x, swept.y = target.x + dx*0.5, target.y + dy*0.5
+    if not number(target.heading):
+        radius = math.hypot(target.length, target.width)*0.5 + lateral_padding
+        endpoint = (target.x + dx, target.y + dy)
+        return swept_path_distance([point for _, point in reference],
+                                   (target.x, target.y), endpoint) <= radius
+    c, s = math.cos(target.heading), math.sin(target.heading)
+    swept.length += abs(c*dx + s*dy)
+    swept.width += abs(-s*dx + c*dy)
+    return footprint_entry(reference, swept, lateral_padding) is not None
 
 
 def circle_entry(reference, x, y, radius):

@@ -9,6 +9,9 @@ TARGET_SCENES = frozenset(
     + tuple(range(30, 42))
 )
 
+# Signal data is required until the map confirms no applicable lamp ahead.
+SIGNAL_SCENES = frozenset((10, 20, 37, 38))
+
 
 def requires_targets(scene_id):
     if type(scene_id) is not int or not 1 <= scene_id <= 41:
@@ -19,4 +22,3 @@ def requires_targets(scene_id):
 # Task semantics only; geometry/velocity still determine each conflict.
 FOLLOW_SCENES = frozenset((14, 15, 22, 23, 24, 25))
 AEB_SCENES = frozenset((1, 2, 3))
-SIGNAL_SCENES = frozenset((10, 20, 37, 38))

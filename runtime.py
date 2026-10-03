@@ -65,6 +65,11 @@ class CaptainRuntime(object):
         self.pipeline_path = os.path.join(config.runtime_dir, "latest_pipeline.json")
         self._warned_no_control = False
         self._snapshot_failures = set()
+        self._braking_signature = None
+        self._braking_next_sample = 0.0
+        self._braking_event_count = 0
+        self._braking_history = []
+        self._braking_io_warned = False
         self.safety = SafetySupervisor(config)
         reset_decision()
         self.runtime_info = decision_info()
@@ -208,6 +213,7 @@ class CaptainRuntime(object):
                 self._publish(perception)
                 self._publish_pipeline(perception, decision, trajectory, control, receipt,
                                        safety)
+            self._trace_braking(perception, decision, trajectory, control, receipt, safety)
             processed += 1
             if processed == 1 or processed % 100 == 0:
                 target_status = perception.source_status.get("targets", {})
@@ -218,7 +224,8 @@ class CaptainRuntime(object):
                 self.logger.info(
                     "frame=%s valid=%s lane=%s targets=%s target_source=%s targets_usable=%s "
                     "target_reason=%s speed=%.2fm/s decision=%s mode=%s decision_reason=%s "
-                    "trajectory=%s control=%s send=%s reason=%s",
+                    "trajectory=%s control=%s send=%s reason=%s "
+                    "stop_distance=%.2f brake=%.3f reference_speed=%s safety_reason=%s",
                     perception.frame_id,
                     perception.valid,
                     perception.lane.lane_id,
@@ -228,11 +235,76 @@ class CaptainRuntime(object):
                     perception.ego.speed,
                     decision.valid, decision.mode, decision.reason,
                     trajectory.valid, control.valid, receipt["reason"],
-                    trajectory.reason if not trajectory.valid else "; ".join(control.errors),
+                    trajectory.reason + "; " + "; ".join(control.errors),
+                    trajectory.stop_distance, control.brake,
+                    control.diagnostics.get("reference_speed_mps"), safety.reason,
                 )
             if once:
                 break
             self._sleep_remaining(start, period)
+
+    def _trace_braking(self, perception, decision, trajectory, control, receipt, safety):
+        """Retain brief brake events that fall between periodic log samples.
+
+        This runs after sending and never changes member outputs or receipts.
+        Save at most 80 full snapshots per process, with eight preceding brief
+        frames and a two-second sample interval during an unchanged brake.
+        """
+        commanded = safety.control if safety.active else control
+        active = (safety.active or not trajectory.valid or trajectory.emergency_stop
+                  or (commanded is not None and commanded.valid
+                      and (commanded.brake > 0 or commanded.handbrake)))
+        signature = (active, safety.mode, safety.reason, trajectory.valid,
+                     trajectory.emergency_stop, trajectory.reason,
+                     control.valid, control.source, tuple(control.errors), decision.mode)
+        now = time.monotonic()
+        previous = self._braking_signature
+        changed = ((active or (previous is not None and previous[0]))
+                   and signature != previous)
+        sample = active and now >= self._braking_next_sample
+        brief = {"frame_id": perception.frame_id, "speed_mps": perception.ego.speed,
+                 "observed_brake": perception.ego.brake, "decision_mode": decision.mode,
+                 "decision_reason": decision.reason, "desired_speed_mps": decision.target_speed,
+                 "stop_distance_m": trajectory.stop_distance,
+                 "trajectory_reason": trajectory.reason, "control_source": control.source,
+                 "control_brake": control.brake, "control_throttle": control.throttle,
+                 "control_diagnostics": to_dict(control.diagnostics),
+                 "safety_reason": safety.reason, "send": dict(receipt),
+                 "target_count": len(perception.targets)}
+        self._braking_signature = signature
+        if changed or sample:
+            event = ("brake_start" if active and (previous is None or not previous[0])
+                     else "brake_release" if not active else
+                     "brake_change" if changed else "brake_sample")
+            self._braking_next_sample = now + 2.0
+            self.logger.info("braking_event=%s frame=%s decision=%s trajectory=%s "
+                             "stop_distance=%.2f control_brake=%.3f reference_speed=%s "
+                             "safety_reason=%s send=%s",
+                             event, perception.frame_id, decision.reason, trajectory.reason,
+                             trajectory.stop_distance, control.brake,
+                             control.diagnostics.get("reference_speed_mps"),
+                             safety.reason, receipt.get("reason"))
+            if self.config.publish_json and self._braking_event_count < 80:
+                self._braking_event_count += 1
+                directory = os.path.join(self.config.runtime_dir, "braking_events")
+                path = os.path.join(directory, "{0}-{1:03d}-{2}.json".format(
+                    self.runtime_info["pid"], self._braking_event_count, perception.frame_id))
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                    self._publish_json(path, {
+                        "event": event, "runtime": dict(self.runtime_info),
+                        "recorded_monotonic": now, "preceding_frames": list(self._braking_history),
+                        "summary": brief, "perception": perception_to_dict(perception),
+                        "decision": to_dict(decision), "trajectory": to_dict(trajectory),
+                        "control": to_dict(control), "send": dict(receipt),
+                        "safety": {"mode": safety.mode, "reason": safety.reason,
+                                   "candidate": to_dict(safety.control)}})
+                except (OSError, TypeError, ValueError) as exc:
+                    if not self._braking_io_warned:
+                        self.logger.warning("刹车事件快照写入失败，控制循环继续: %s", exc)
+                        self._braking_io_warned = True
+        self._braking_history.append(brief)
+        self._braking_history = self._braking_history[-8:]
 
     def _wait_until_running(self):
         last_status = None
