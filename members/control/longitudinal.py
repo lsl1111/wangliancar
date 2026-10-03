@@ -18,6 +18,15 @@ def pedal_request(speed, reference, integral, dt, settings, calibration,
     # Preview may request propulsion only while below the speed reference.
     if error <= 0:
         feedforward = min(0.0, feedforward)
+    # A falling profile can require braking before the current speed reference
+    # becomes lower than GPS speed. Acceleration-era load integral must not
+    # reverse that demand into propulsion. Preserve it for steady/rising
+    # profiles and when the vehicle is substantially below a falling reference.
+    reset_for_braking = (feedforward < -1e-6
+                         and settings.pi_kp * error + feedforward <= 0.0
+                         and proposal > 0.0)
+    if reset_for_braking:
+        proposal = 0.0
     demand = settings.pi_kp * error + settings.pi_ki * proposal + feedforward
     if error < 0 and demand > 0:
         proposal, demand = 0.0, settings.pi_kp * error + feedforward
@@ -34,7 +43,7 @@ def pedal_request(speed, reference, integral, dt, settings, calibration,
                 max(0.0, -demand * calibration.brake_per_mps))
     saturated = (throttle >= calibration.max_throttle and error > 0 or
                  brake >= calibration.max_brake and error < 0)
-    if saturated:
+    if saturated and not reset_for_braking:
         proposal = integral  # anti-windup: do not integrate farther into saturation
     return throttle, brake, proposal, error
 
