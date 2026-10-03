@@ -10,6 +10,7 @@ from core.route_segments import verified_spans
 from core.route_motion import lateral_residual
 from core.geometry import project_polyline, swept_path_distance
 from core.obstacle_geometry import longitudinal_extent
+from core.target_semantics import mapped_traffic_light
 
 
 
@@ -166,6 +167,9 @@ def build_candidate(target, ego, perception, route, settings):
     values = (target.x, target.y, target.vx, target.vy)
     if not all(_finite(value) for value in values):
         candidate.conflict, candidate.reason = True, "target pose or velocity invalid"
+        return candidate
+    if mapped_traffic_light(target, perception):
+        candidate.reason = "mapped traffic-light fixture"
         return candidate
     lane = perception.lane
     if target.same_lane_valid is True and target.lane_id == lane.lane_id:
