@@ -247,7 +247,11 @@ class PipelineIntegrationTests(unittest.TestCase):
                         runtime._loop(builder, False)
                 self.assertEqual(sdk.frames, len(sdk.sent))
                 snapshot_warnings = [w for w in warnings if "诊断快照写入失败" in w[0]]
-                self.assertEqual(2, len(snapshot_warnings))
+                # Each latest snapshot still warns only once. Additional
+                # immutable brake-event files may report their own failure.
+                warned_paths = [w[1] for w in snapshot_warnings]
+                self.assertEqual(1, warned_paths.count(runtime.snapshot_path))
+                self.assertEqual(1, warned_paths.count(runtime.pipeline_path))
                 if options["scene"] == 6:
                     self.assertGreater(sdk.sent[-1]["throttle"], 0.0)
                     self.assertGreater(sdk.speed, 0.0)
