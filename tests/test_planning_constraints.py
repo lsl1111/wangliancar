@@ -50,14 +50,13 @@ class PlanningConstraintTests(unittest.TestCase):
             target = verified_target(p, vx=5.0, vy=vy)
             result = build_trajectory(p, d, config)
             self.assert_profile(result, d, config)
-            drift = abs(vy) * 3.0
-            extent = 0.5 * math.hypot(target.length, target.width)
+            extent = target.length * 0.5
             self.assertLessEqual(result.points[-1].x + config.front_offset_m
-                                 + config.obstacle_margin_m + extent
-                                 + config.half_width_m + drift, target.x + 1e-7)
+                                 + config.obstacle_margin_m + extent, target.x + 1e-7)
             target.vy = 0.0
             stationary_lateral = build_trajectory(p, d, config)
-            self.assertLess(result.stop_distance, stationary_lateral.stop_distance)
+            # Expansion is lateral, not an extra longitudinal business gap.
+            self.assertAlmostEqual(result.stop_distance, stationary_lateral.stop_distance)
 
     def test_lateral_exception_needs_geometry_and_verified_current_lane(self):
         for change in ("unverified", "other_lane", "width", "heading", "edge",

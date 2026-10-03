@@ -142,6 +142,12 @@ class PreparedPath(object):
         # An interior zero-speed constraint is never bypassed this way.
         if s <= 1e-6 and trajectory.target_speed > 0:
             preview_s = min(self.length, s + settings.launch_preview_m)
+            if (trajectory.stop_required and self.points[-1][2] <= 1e-6
+                    and preview_s >= self.length):
+                # A short replanned accelerate-then-stop profile has a zero
+                # endpoint. Sample its interior so a stationary car can creep
+                # to the actual boundary, respecting every subsequent cap.
+                preview_s = self.length * 0.5
             preview_speed = self.sample(preview_s)[2]
             launch_limit = math.sqrt(local * local +
                                      2.0 * settings.launch_accel_mps2 *

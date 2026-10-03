@@ -152,6 +152,11 @@ class DataChainTests(unittest.TestCase):
         decision = decide(value)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertGreater(decision.stop_distance, 0.0)
+        trajectory = plan(value, decision)
+        self.assertTrue(trajectory.valid, trajectory.reason)
+        self.assertFalse(trajectory.emergency_stop)
+        self.assertTrue(trajectory.stop_required)
+        self.assertLess(trajectory.points[-1].x + 3.5, 40.0)
 
     def test_reference_starts_ahead_and_emergency_is_transmitted(self):
         p = self.builder.build_from_raw(self.raw(x=150))
@@ -220,6 +225,8 @@ class DataChainTests(unittest.TestCase):
         raw["gps"]["vx"] = 0.0
         p = self.builder.build_from_raw(raw)
         p.traffic.observed = True
+        p.traffic.valid = True
+        p.source_status["traffic"]["usable"] = True
         p.traffic.signal_state = "RED"
         p.traffic.stop_line_distance = 20.0
         p.traffic.valid = p.traffic.association_valid = True
@@ -228,7 +235,7 @@ class DataChainTests(unittest.TestCase):
         decision = decide(p)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertEqual(2.0, decision.target_speed)
-        self.assertAlmostEqual(13.5, decision.stop_distance)
+        self.assertAlmostEqual(16.2, decision.stop_distance)
         p.traffic.observed = False
         p.lane.valid = False
         decision = decide(p)

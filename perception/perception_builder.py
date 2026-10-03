@@ -234,10 +234,14 @@ class PerceptionBuilder(object):
         if not result.targets_valid and requires_targets(result.scene_id):
             result.errors.append("TARGETS_UNAVAILABLE")
         result.traffic = self._build_traffic(result.ego, result.lane, result.errors)
-        result.source_status['traffic'] = {
-            'clock':'host_query','association_valid':result.traffic.association_valid,
-            'signal_presence':result.traffic.signal_presence,'required':result.traffic.required,
-            'usable':result.traffic.valid,'quality':'ok' if result.traffic.valid else result.traffic.reason}
+        result.source_status["traffic"] = {
+            "clock": "host_query",  # this SDK structure has no frame header
+            "association_valid": result.traffic.association_valid,
+            "signal_presence": result.traffic.signal_presence,
+            "required": result.traffic.required,
+            "usable": result.traffic.valid,
+            "quality": "ok" if result.traffic.valid else result.traffic.reason,
+        }
         if result.traffic.observed:
             result.traffic_source = "hdmap+simone"
         result.valid = result.ego.valid
@@ -445,7 +449,7 @@ class PerceptionBuilder(object):
         target.vx = float(item.get("vx", 0.0))
         target.vy = float(item.get("vy", 0.0))
         target.vz = float(item.get("vz", 0.0))
-        target.heading = float(item['heading']) if item.get('heading') is not None else None
+        target.heading = float(item["heading"]) if item.get("heading") is not None else None
         target.roll = float(item.get("roll", 0.0))
         target.pitch = float(item.get("pitch", 0.0))
         target.sdk_data = dict(item.get("sdk_data", {}))

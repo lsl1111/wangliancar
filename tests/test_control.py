@@ -176,6 +176,35 @@ class ControlTests(unittest.TestCase):
         self.assertTrue(result.valid, result.errors)
         self.assertLessEqual(result.diagnostics["reference_speed_mps"], 2.0)
 
+    def test_short_precision_stop_can_launch_and_hold_at_endpoint(self):
+        points = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.4), (1.0, 0.0, 0.0)]
+        p, t = inputs(speed=0, x=0, points=points)
+        t.stop_required, t.precision_stop = True, True
+        t.stop_distance, t.target_speed = 1.0, 0.4
+        output = self.engine.compute(p, t)
+        self.assertTrue(output.valid, output.errors)
+        self.assertGreater(output.throttle, 0)
+        self.advance()
+        p, t = inputs(frame=2, speed=0, x=1, points=points)
+        t.stop_required, t.precision_stop = True, True
+        t.stop_distance, t.target_speed = 0.0, 0.4
+        output = self.engine.compute(p, t)
+        self.assertTrue(output.valid, output.errors)
+        self.assertEqual(0, output.throttle)
+        self.assertGreater(output.brake, 0)
+
+    def test_short_stop_preview_does_not_cross_interior_zero_speed(self):
+        points = [(0.0, 0.0, 0.0), (0.25, 0.0, 0.3),
+                  (0.5, 0.0, 0.0), (0.75, 0.0, 0.3), (1.0, 0.0, 0.0)]
+        p, t = inputs(speed=0, x=0.5, points=points)
+        t.stop_required, t.precision_stop = True, True
+        t.stop_distance, t.target_speed = 0.5, 0.3
+        output = self.engine.compute(p, t)
+        self.assertTrue(output.valid, output.errors)
+        self.assertEqual(0, output.diagnostics["reference_speed_mps"])
+        self.assertEqual(0, output.throttle)
+        self.assertGreater(output.brake, 0)
+
     def test_general_forward_lateral_shift_is_tracked(self):
         # The controller follows the supplied path without selecting a lane.
         points = []

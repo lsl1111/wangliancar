@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core.interfaces import DecisionMode, Target
+from core.interfaces import DecisionMode, DecisionTarget, Target
 from members.decision.engine import DecisionEngine
 from members.decision.settings import DecisionSettings
 from members.planning.lane_planner import PlannerSettings, build_trajectory
@@ -32,6 +32,7 @@ class GeneralRouteMotionTests(unittest.TestCase):
         self.assertFalse(before.valid)
         d = DecisionEngine(self.ds).run(p)
         self.assertEqual(DecisionMode.FOLLOW, d.mode, d.reason)
+        self.assertEqual(self.ds.min_gap, d.obstacle_clearances_m[str(target.id)])
         after = build_trajectory(p, d, self.ps)
         self.assertTrue(after.valid, after.reason)
         self.assertFalse(after.emergency_stop)
@@ -75,6 +76,47 @@ class GeneralRouteMotionTests(unittest.TestCase):
         self.assertTrue(t.valid,t.reason)
         target.y,target.lane_id,target.same_lane = 0,p.lane.lane_id,True
         self.assertIn(DecisionEngine(self.ds).run(p).mode,(DecisionMode.STOP,DecisionMode.EMERGENCY_BRAKE))
+
+    def test_wide_adjacent_oncoming_car_does_not_restore_circular_false_conflict(self):
+        p = perception(speed=0)
+        target = add_target(p, longitudinal=30, speed=-5, lane_id='other')
+        target.y, target.heading = 3.5, math.pi
+        target.length, target.width = 5.2, 2.23
+        d = DecisionEngine(self.ds).run(p)
+        self.assertGreater(d.target_speed, 0, d.reason)
+        t = build_trajectory(p, d, self.ps)
+        self.assertTrue(t.valid, t.reason)
+        self.assertFalse(t.stop_required or t.emergency_stop)
+        target.vy = -1
+        d = DecisionTarget().bind(p)
+        d.valid, d.target_speed = True, 5
+        intrusion = build_trajectory(p, d, self.ps)
+        self.assertFalse(intrusion.valid)
+        self.assertIn('motion unsupported', intrusion.reason)
+
+    def test_planner_checks_crossing_between_sweep_endpoints_independently(self):
+        p = perception(speed=3)
+        target = add_target(p, longitudinal=10, speed=0, same_lane_valid=False, lane_id='')
+        target.y, target.vy, target.heading = 10, -6, -math.pi/2
+        d = DecisionTarget().bind(p)
+        d.valid, d.target_speed = True, 5
+        t = build_trajectory(p, d, self.ps)
+        self.assertFalse(t.valid)
+        self.assertIn('motion unsupported', t.reason)
+
+    def test_unknown_heading_offroute_motion_retains_circular_sweep_fallback(self):
+        p = perception(speed=0)
+        target = add_target(p, longitudinal=30, speed=-5, lane_id='other')
+        target.y, target.heading = 8, None
+        d = DecisionEngine(self.ds).run(p)
+        self.assertGreater(d.target_speed, 0, d.reason)
+        t = build_trajectory(p, d, self.ps)
+        self.assertTrue(t.valid, t.reason)
+        self.assertFalse(t.stop_required or t.emergency_stop)
+        target.vy = -4
+        d = DecisionTarget().bind(p)
+        d.valid, d.target_speed = True, 5
+        self.assertFalse(build_trajectory(p, d, self.ps).valid)
 
     def test_real_static_hazard_disappearance_still_needs_clear_confirmation(self):
         engine = DecisionEngine(self.ds)

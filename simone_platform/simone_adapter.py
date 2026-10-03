@@ -477,7 +477,7 @@ class SimOneAdapter(object):
             "vx": float(item.velX),
             "vy": float(item.velY),
             "vz": float(item.velZ),
-            "heading": float(item.oriZ) if getattr(item,'oriZ',None) is not None else None,
+            "heading": float(item.oriZ) if getattr(item, "oriZ", None) is not None else None,
             "roll": float(getattr(item, "oriX", 0.0)),
             "pitch": float(getattr(item, "oriY", 0.0)),
             "ax": float(getattr(item, "accelX", 0.0)),

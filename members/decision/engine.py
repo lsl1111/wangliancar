@@ -9,7 +9,7 @@ import math
 from core.interfaces import DecisionMode, DecisionTarget
 from core.geometry import opposes_direction
 from core.traffic_quality import traffic_required, traffic_usable, can_approach_signal
-from core.scene_requirements import requires_targets
+from core.scene_requirements import requires_targets, FOLLOW_SCENES, AEB_SCENES
 
 from members.decision import candidates, protocol, speed_policy
 from members.decision.constraints import ConstraintSet
@@ -40,6 +40,8 @@ class DecisionEngine(object):
         self._clear_count = 0
         self._static_targets = {}
         self._moving_confirm = {}
+        self._follow_targets = set()
+        self._emergency_static_targets = set()
         self._had_target_conflict = False
         self._target_clear_count = 0
         self._context = None
@@ -131,6 +133,7 @@ class DecisionEngine(object):
                                valid_until=perception.valid_until)
         saw_target_conflict = False
         saw_safe_follow = False
+        result.obstacle_clearance_m = settings.obstacle_stop_margin
         seen_ids = set()
         for target in perception.targets if protocol.targets_usable(perception) else []:
             item = candidates.build_candidate(target, perception.ego,
@@ -142,6 +145,8 @@ class DecisionEngine(object):
                 seen_ids.add(identifier)
             if item.gap is not None and speed_policy.is_emergency(item, ego_speed, settings):
                 saw_target_conflict = True
+                if item.static and type(identifier) is int and identifier >= 0:
+                    self._emergency_static_targets.add(identifier)
                 result.add("EMERGENCY", "target", identifier,
                            "EMERGENCY_TARGET:id={0},gap={1:.2f},ttc={2:.2f}".format(
                                identifier, item.gap, item.ttc),
@@ -165,6 +170,17 @@ class DecisionEngine(object):
                            valid_until=perception.valid_until)
                 continue
             static = item.static
+            follow_context = (perception.scene_id in FOLLOW_SCENES
+                              or (identifier in self._follow_targets
+                                  and perception.scene_id not in AEB_SCENES))
+            if not static and perception.scene_id not in AEB_SCENES:
+                self._follow_targets.add(identifier)
+                follow_context = True
+            gap = settings.min_gap if follow_context or not static else settings.obstacle_stop_margin
+            if type(identifier) is int and identifier >= 0:
+                result.obstacle_clearances_m[str(identifier)] = gap
+            else:
+                result.obstacle_clearance_m = max(result.obstacle_clearance_m, gap)
             if type(identifier) is int and identifier >= 0:
                 if static:
                     self._static_targets[identifier] = True
@@ -180,6 +196,16 @@ class DecisionEngine(object):
                         self._moving_confirm.pop(identifier, None)
             if static:
                 saw_target_conflict = True
+                stop_distance = (max(0.0, item.gap - settings.min_gap)
+                                 if follow_context else item.stop_distance)
+                if (identifier in self._emergency_static_targets
+                        and stop_distance is not None
+                        and stop_distance <= settings.resume_margin):
+                    # A near static target that already caused emergency
+                    # braking must not launch another approach at standstill.
+                    stop_distance = 0.0
+                else:
+                    self._emergency_static_targets.discard(identifier)
                 if item.stop_distance is None:
                     result.add("PROTECT", "target", identifier,
                                "TARGET_STOP:distance_unknown",
@@ -187,11 +213,12 @@ class DecisionEngine(object):
                 else:
                     result.add("STOP", "target", identifier,
                                "STOP_TARGET:id={0},distance={1:.2f}".format(
-                                   identifier, item.stop_distance),
-                               distance=item.stop_distance,
+                                   identifier, stop_distance),
+                               distance=stop_distance,
                                valid_until=perception.valid_until)
             else:
                 saw_safe_follow = True
+                self._emergency_static_targets.discard(identifier)
                 demand = speed_policy.follow_speed(item, ego_speed, cruising, settings)
                 result.add("FOLLOW", "target", identifier,
                            "FOLLOW_TARGET:id={0},gap={1:.2f},speed={2:.2f}".format(
@@ -201,6 +228,8 @@ class DecisionEngine(object):
             if identifier not in seen_ids:
                 self._static_targets.pop(identifier, None)
                 self._moving_confirm.pop(identifier, None)
+        self._follow_targets.intersection_update(seen_ids)
+        self._emergency_static_targets.intersection_update(seen_ids)
         if saw_target_conflict:
             self._had_target_conflict = True
             self._target_clear_count = 0
@@ -267,6 +296,8 @@ class DecisionEngine(object):
         cruising = speed_policy.desired_speed(perception, settings)
         constraints = self._collect(perception, route, ego_speed, cruising,
                                     distinct)
+        output.obstacle_clearance_m = constraints.obstacle_clearance_m
+        output.obstacle_clearances_m = dict(constraints.obstacle_clearances_m)
         emergency = constraints.first("EMERGENCY")
         if emergency is not None:
             self._protect(output, ego.speed, constraints.reason(emergency), True,
@@ -344,6 +375,7 @@ class DecisionEngine(object):
         output.target_speed = float(speed)
         output.target_lane_id = perception.lane.lane_id
         output.stop_distance = -1.0 if stop is None else float(stop.distance)
+        output.precision_stop = stop is not None
         primary = stop if stop is not None else constraints.first("FOLLOW")
         if primary is None:
             output.reason = "CRUISE:limit={0:.2f}".format(cruising)

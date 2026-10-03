@@ -21,6 +21,8 @@ class ConstraintSet(object):
     def __init__(self, speed_limit):
         self.speed_limit = float(speed_limit)
         self.items = []
+        self.obstacle_clearance_m = -1.0
+        self.obstacle_clearances_m = {}
 
     def add(self, kind, source, identifier, reason, distance=None,
             speed=None, valid_until=0.0):
