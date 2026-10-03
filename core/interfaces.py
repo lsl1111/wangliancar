@@ -104,6 +104,9 @@ class Target(object):
         self.lane_source = "unknown"
         self.lateral_band_match = False
         self.lane_id = ""
+        # HD-map width measured at this target's own position, in metres.
+        # None means unavailable; never borrow the ego lane's width for a successor.
+        self.lane_width_m = None
         self.roll = 0.0
         self.pitch = 0.0
         self.relative_roll = None
@@ -136,6 +139,10 @@ class LaneContext(object):
         # are world metres; IDs are plain strings, never SDK objects.
         self.forward_reference = []
         self.forward_lane_ids = []
+        # Inclusive point indices in forward_reference, in the same order as
+        # forward_lane_ids. Adjacent spans share their verified join point.
+        # An empty list denotes legacy/unknown segment boundaries.
+        self.forward_lane_spans = []
         self.forward_reference_valid = False
         # map_end: confirmed terminal; lookahead_limit: more links exist.
         # Other values describe why expansion stopped at a known boundary.

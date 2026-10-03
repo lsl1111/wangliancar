@@ -188,9 +188,10 @@ class DecisionTests(unittest.TestCase):
         p = perception(speed=5.0)
         add_red_light(p, 30.0, ambiguous=True)
         result = self.run_engine(p)
-        self.assertEqual(DecisionMode.EMERGENCY_BRAKE, result.mode)
-        self.assertEqual(0.0, result.target_speed)
-        self.assertIn("TRAFFIC_SOURCE", result.reason)
+        self.assertEqual(DecisionMode.KEEP_LANE, result.mode)
+        self.assertGreater(result.stop_distance, 0.0)
+        self.assertLess(result.stop_distance, 30.0)
+        self.assertIn("STOP_TRAFFIC", result.reason)
 
     def test_unknown_stop_line_position_still_stops(self):
         p = perception(speed=5.0)

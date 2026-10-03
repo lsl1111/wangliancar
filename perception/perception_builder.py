@@ -155,6 +155,9 @@ class PerceptionBuilder(object):
                                                                 "data_invalid": True}
         if result.ego.valid:
             try:
+                if hasattr(self.route_manager,'set_route_hint'):
+                    self.route_manager.set_route_hint(result.route_points,result.route_valid,
+                                                       (result.case_id,result.task_id))
                 result.lane = self.route_manager.update(result.ego)
             except Exception as exc:
                 result.errors.append("LANE_UNAVAILABLE:" + type(exc).__name__)
@@ -351,6 +354,8 @@ class PerceptionBuilder(object):
         group = [item for item in traffic.candidates
                  if abs(item["stop_distance"] - nearest["stop_distance"]) < 1.0]
         if traffic.reason == "signal_record_invalid":
+            # A malformed associated record may have a nearer stop line.
+            traffic.stop_line_distance = -1.0
             return traffic
         if any(item["read_ok"] is not True for item in group):
             traffic.reason = "signal_read_unavailable"

@@ -4,6 +4,8 @@
 
 组员开始开发前，请先阅读 [四人协作开发说明](TEAM_COLLABORATION.md)。
 
+2026-10-03 修复分支补充弯道目标运动校验、接头归属恢复、任务点分叉选择及信号质量/停车约束，路线版本为 `successor-continuation-v3`。真实刹车帧的证据、公共字段及平台待验证范围见 [通用运动修正](perception/GENERAL_MOTION_FIXES.md)。
+
 ## 当前已经做到
 
 - 使用官方 `SoInitSimOneAPI` 连接 SimOne，读取 GPS，并按场景传感器配置读取目标；目标传感器不可用时 Ground Truth 仅作诊断回退。
@@ -57,6 +59,8 @@ SimOne API -> 队长 Perception -> 决策 DecisionTarget
 4. 停止时按 `Ctrl+C`，或运行 `scripts/KillCaptain.bat`。
 
 平台调用记录还会写入 `runtime_data/launcher.log`。如果案例结束后没有快照，先看这个文件确认启动脚本是否执行、Python 是否异常退出，再看 `captain.log` 的“等待案例运行”和“首帧检查”日志定位卡在案例状态还是感知读取。同一案例重复调用启动脚本时，第二个队长进程会退出并记下“忽略重复启动”，避免两个进程同时连接同一辆车。Windows PowerShell 可用 `Get-Content .\runtime_data\captain.log -Tail 50 -Wait` 实时看日志。默认配置仍是 `send_control=false`、`safety_brake_enabled=false`；因此即使出现有效控制候选，也不会驱动车辆。
+
+普通链路日志每 100 次循环输出一次，可能漏掉短暂刹车。运行层另即时记录 `braking_event=brake_start/brake_change/brake_release`，稳定制动期间每两秒采样，区分规划失效、安全监护和控制器正常减速。开启 JSON 诊断时，在 `runtime_data/braking_events/` 保存每进程最多 80 个完整事件快照，文件名含 PID、序号和感知帧。快照包含同帧感知、路线、目标原始运动和宽度、决策、轨迹、控制、监护与发送回执，并保留前八帧摘要；因此后来的巡航快照不会覆盖早先的刹车帧。候选或发送成功回执不等于平台已经执行，需与自车速度和 GPS 刹车反馈一起核对。事件记录不改变规划或控制指令，写入失败不终止控制循环。
 
 只验证 SDK 能否加载，不连接案例：
 

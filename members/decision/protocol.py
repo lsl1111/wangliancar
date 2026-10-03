@@ -82,14 +82,14 @@ def traffic_requires_stop(traffic):
     """
     if not isinstance(traffic, object):
         return False
-    if not traffic.observed:
+    if not traffic.observed and not getattr(traffic,'required',False):
         return False
     if traffic.ambiguous:
         return True
     state = traffic.signal_state
     if not isinstance(state, str):
         return True
-    return state != "GREEN"
+    return state != "GREEN" or traffic.valid is not True
 
 
 def traffic_stop_distance(traffic, margin):
