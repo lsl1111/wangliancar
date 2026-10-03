@@ -293,6 +293,7 @@ class RouteManager(object):
 
     def locate_target(self, target):
         """Map membership requires bounded projection and a measured lane width."""
+        target.lane_width_m = None
         if not self.adapter.map_loaded:
             return "", False
         try:
@@ -316,6 +317,7 @@ class RouteManager(object):
             road_z = points[i][2] + r * (points[i + 1][2] - points[i][2])
             if abs(target.z - road_z) > max(2.0, target.height):
                 return "", False
+            target.lane_width_m = float(width.width)
             return _sdk_string(nearest.laneId), True
         except (AttributeError, TypeError, ValueError, RuntimeError):
             return "", False

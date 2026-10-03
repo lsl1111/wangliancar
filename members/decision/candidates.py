@@ -6,6 +6,7 @@ vehicle extent uncertainty remain explicit instead of becoming zero metres.
 """
 
 import math
+from core.route_segments import verified_spans
 
 
 
@@ -116,23 +117,7 @@ class RouteContext(object):
         spans = getattr(lane, "forward_lane_spans", [])
         # Only complete, contiguous metadata over the unchanged reference is
         # trusted. Legacy inputs retain the conservative first-successor rule.
-        if not isinstance(spans, (list, tuple)) or len(spans) != len(ids):
-            return
-        previous_end = 0
-        checked = {}
-        for index, span in enumerate(spans):
-            if not isinstance(span, dict) or span.get("lane_id") != ids[index]:
-                return
-            start, end = span.get("start_index"), span.get("end_index")
-            if (type(start) is not int or type(end) is not int
-                    or start != previous_end or not start < end < len(forward)
-                    or ids[index] in checked
-                    or (index == 0 and end != len(self.current) - 1)):
-                return
-            checked[ids[index]] = (start, end)
-            previous_end = end
-        if previous_end == len(forward) - 1:
-            self.spans = checked
+        self.spans = verified_spans(len(self.current), len(forward), ids, spans)
 
     def project(self, x, y, settings, lane_id=None):
         self.projection_reason = ""

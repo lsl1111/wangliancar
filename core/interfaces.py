@@ -104,6 +104,9 @@ class Target(object):
         self.lane_source = "unknown"
         self.lateral_band_match = False
         self.lane_id = ""
+        # HD-map width measured at this target's own position, in metres.
+        # None means unavailable; never borrow the ego lane's width for a successor.
+        self.lane_width_m = None
         self.roll = 0.0
         self.pitch = 0.0
         self.relative_roll = None
