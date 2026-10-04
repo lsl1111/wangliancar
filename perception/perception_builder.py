@@ -10,6 +10,7 @@ from core.interfaces import EgoState, Perception, Target, TrafficControl
 from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
 from perception.map_semantics import speed_limit_observations
+from perception.traffic_geometry import signal_reference, stop_line_position
 
 
 # ESimOne_TrafficLight_Status values returned by SoGetTrafficLights.
@@ -296,28 +297,46 @@ class PerceptionBuilder(object):
         traffic.speed_limit = lane.speed_limit
         if not ego.valid or not lane.valid:
             return traffic
-        try:
-            lights = self.adapter.read_traffic(lane.lane_id) or []
-        except Exception as exc:
-            errors.append("TRAFFIC_UNAVAILABLE:" + type(exc).__name__)
+        reference, identities = signal_reference(lane)
+        if reference is None:
             return traffic
-        query = getattr(self.adapter, "last_traffic_query", {})
-        traffic.association_valid = (isinstance(query, dict)
-                                     and query.get("association_valid") is True)
+        lights, queries, query_failed = [], [], False
+        for identity in identities:
+            try:
+                records = self.adapter.read_traffic(identity) or []
+                query = getattr(self.adapter, 'last_traffic_query', {})
+                queries.append(isinstance(query, dict) and query.get('association_valid') is True)
+                if isinstance(query, dict) and query.get('association_valid') is False:
+                    query_failed = True
+                for record in records:
+                    # The same map line can be associated with adjacent lanes.
+                    # Keep conflicting dynamic reads, but not duplicate receipts.
+                    item = copy.deepcopy(record)
+                    if isinstance(item, dict):
+                        item.pop('association_lane_id', None)
+                    if item not in lights:
+                        lights.append(item)
+            except Exception as exc:
+                errors.append("TRAFFIC_UNAVAILABLE:" + type(exc).__name__)
+                query_failed = True
+        traffic.association_valid = bool(queries) and all(queries) and not query_failed
+        # The producer has already verified ego on this current lane. Do not
+        # move its anchor to a spatially close return leg in the continuation.
         origin = project_polyline(lane.center_line, ego.x, ego.y)
-        if origin is None:
+        if (origin is None or origin['distance'] > max(2.0, lane.lane_width)
+                or not projection_within_polyline(origin, len(lane.center_line))):
+            traffic.required = bool(lights)
+            traffic.reason = 'signal_route_anchor_unavailable'
             return traffic
+        unresolved = []
         for light in lights:
             try:
                 status = int(light.get("status", 0))
-                sx, sy = float(light["stop_line_x"]), float(light["stop_line_y"])
-                if not all(math.isfinite(v) for v in (sx, sy)):
-                    raise ValueError("invalid stopline")
-                stop = project_polyline(lane.center_line, sx, sy)
-                if (stop is None or stop["distance"] > max(2.0, lane.lane_width)
-                        or not projection_within_polyline(stop, len(lane.center_line))):
+                stop_s, lower_bound = stop_line_position(reference, light, lane.lane_width)
+                if stop_s is None:
+                    unresolved.append(lower_bound)
                     continue
-                distance = stop["s"] - origin["s"]
+                distance = stop_s - origin["s"]
                 if distance < 0:
                     continue
                 item = copy.deepcopy(light)
@@ -341,12 +360,23 @@ class PerceptionBuilder(object):
                 traffic.required = True
                 traffic.reason = "signal_record_invalid"
         traffic.candidates.sort(key=lambda item: item["stop_distance"])
+        nearest_s = (traffic.candidates[0]['stop_distance'] + origin['s']
+                     if traffic.candidates else None)
+        if ((query_failed and lights) or any(bound is None or nearest_s is None or bound <= nearest_s
+                                for bound in unresolved)):
+            traffic.required = True
+            if traffic.reason != 'signal_record_invalid':
+                traffic.reason = ('signal_association_unavailable' if query_failed else
+                                  'signal_stopline_unresolved')
+                errors.append('TRAFFIC_STOPLINE_UNRESOLVED')
         if not traffic.candidates:
+            if query_failed and not traffic.required:
+                traffic.reason = 'signal_association_unavailable'
             if traffic.association_valid and not traffic.required:
                 traffic.signal_presence = "absent"
                 traffic.reason = "no_applicable_signal_ahead"
             return traffic
-        traffic.association_valid = True
+        traffic.association_valid = not query_failed
         traffic.signal_presence = "present"
         traffic.required = True
         traffic.observed = True
@@ -354,27 +384,30 @@ class PerceptionBuilder(object):
         traffic.stop_line_distance = nearest["stop_distance"]
         group = [item for item in traffic.candidates
                  if abs(item["stop_distance"] - nearest["stop_distance"]) < 1.0]
-        if traffic.reason == "signal_record_invalid":
-            # A malformed associated record may have a nearer stop line.
+        if traffic.reason in ('signal_record_invalid', 'signal_stopline_unresolved',
+                              'signal_association_unavailable'):
+            # An unresolved associated record/query may have a nearer line.
             traffic.stop_line_distance = -1.0
             return traffic
         if any(item["read_ok"] is not True for item in group):
             traffic.reason = "signal_read_unavailable"
             errors.append("TRAFFIC_STATE_UNAVAILABLE")
             return traffic
-        # Direction association is not exposed reliably by this binding. Retain
-        # candidates, mark ambiguity, and never choose a green by list order.
-        if (len(set(item["opendrive_id"] for item in group)) > 1
-                or len(set(item["signal_state"] for item in group)) > 1):
+        # Direction association is not exposed reliably by this binding. Never
+        # choose a green by list order. A group may release only when every
+        # associated candidate is freshly readable and agrees on GREEN.
+        if len(set(item["signal_state"] for item in group)) > 1:
             traffic.ambiguous, traffic.reason = True, "signal_direction_unresolved"
             errors.append("TRAFFIC_AMBIGUOUS")
             return traffic
         traffic.signal_state = nearest["signal_state"]
-        traffic.signal_id = nearest["opendrive_id"]
-        traffic.count_down = nearest["count_down"]
+        multiple = len(set(item['opendrive_id'] for item in group)) > 1
+        traffic.signal_id = -1 if multiple else nearest["opendrive_id"]
+        traffic.count_down = min(item['count_down'] for item in group)
         traffic.signal_distance = nearest["signal_distance"]
         traffic.valid = True
-        traffic.reason = "unique_lane_stopline_signal"
+        traffic.reason = ('unanimous_lane_stopline_signals' if multiple else
+                          'unique_lane_stopline_signal')
         return traffic
 
     @staticmethod

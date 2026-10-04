@@ -763,7 +763,8 @@ class SimOneAdapter(object):
         Uses the dynamic per-frame signal truth via SoGetTrafficLights, keyed by
         the static light ids discovered from the HD map (getTrafficLightList).
         Returns a list of dicts, one per currently relevant traffic light:
-          {opendrive_id, status, count_down, x, y}
+          {opendrive_id, status, count_down, x, y, stop_line_x, stop_line_y,
+           stop_line_boundary (when exposed), association_lane_id}
         A failed dynamic read retains its map candidate with read_ok=False.
         last_traffic_query distinguishes confirmed association from an absent
         map API; [] alone is not proof that a road has no applicable signal.
@@ -792,13 +793,21 @@ class SimOneAdapter(object):
                 for stop_index in range(stoplines.Size()):
                     stopline = stoplines.GetElement(stop_index)
                     knots = getattr(stopline, "boundaryKnots", None)
+                    boundary = None
                     if knots and knots.Size():
-                        sx = sum(float(knots.GetElement(j).x) for j in range(knots.Size())) / knots.Size()
-                        sy = sum(float(knots.GetElement(j).y) for j in range(knots.Size())) / knots.Size()
+                        boundary = [[float(knots.GetElement(j).x),
+                                     float(knots.GetElement(j).y),
+                                     float(getattr(knots.GetElement(j), 'z', 0.0))]
+                                    for j in range(knots.Size())]
+                        sx = sum(point[0] for point in boundary) / len(boundary)
+                        sy = sum(point[1] for point in boundary) / len(boundary)
                     else:
                         sx = float(stopline.pt.x)
                         sy = float(stopline.pt.y)
-                    stop_points.append((sx, sy))
+                    point = {'stop_line_x': sx, 'stop_line_y': sy}
+                    if boundary is not None:
+                        point['stop_line_boundary'] = boundary
+                    stop_points.append(point)
                 if stop_points:
                     pt = getattr(light, "pt", None)
                     candidates.append((int(light.id), getattr(pt, "x", None),
@@ -818,17 +827,20 @@ class SimOneAdapter(object):
                 read_ok, status, count_down = False, 0, -1
             if not read_ok:
                 self.last_traffic_query["read_ok"] = False
-            for sx, sy in stop_points:
-                lights.append({
+            for stop_point in stop_points:
+                # Accept older in-memory cache fixtures as point-only records.
+                point = (copy.deepcopy(stop_point) if isinstance(stop_point, dict) else
+                         dict(stop_line_x=stop_point[0], stop_line_y=stop_point[1]))
+                point.update({
                     "opendrive_id": opendrive_id,
                     "status": status,
                     "count_down": count_down,
                     "read_ok": read_ok,
-                    "stop_line_x": sx,
-                    "stop_line_y": sy,
+                    "association_lane_id": lane_id,
                     "x": float(x) if isinstance(x, (int, float)) else None,
                     "y": float(y) if isinstance(y, (int, float)) else None,
                 })
+                lights.append(point)
         return lights
 
     def get_driver_control(self):
