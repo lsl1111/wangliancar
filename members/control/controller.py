@@ -320,6 +320,14 @@ class ControlEngine(object):
                 progress, trajectory, self.settings, reference)
             if trajectory.stop_required and trajectory.target_speed == 0:
                 acceleration = min(0.0, acceleration)
+                # A rolling STOP profile pins its first point to GPS speed
+                # and forbids propulsion. Once its current brake demand is
+                # neutral, a negative integral has no positive-error path to
+                # unwind and would keep braking before the requested endpoint.
+                # Retain it whenever the profile still asks for deceleration
+                # or the measured vehicle is above the reference.
+                if acceleration == 0.0 and reference >= ego.speed:
+                    self.integral = 0.0
             throttle, brake, next_integral, speed_error = pedal_request(
                 ego.speed, reference, self.integral, dt,
                 self.settings, self.calibration, acceleration)

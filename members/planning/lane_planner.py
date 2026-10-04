@@ -17,7 +17,7 @@ from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from members.planning.obstacle_guard import obstacle_stop
 from members.planning.speed_constraints import upcoming_limits, speed_caps
 from members.planning.reference_recovery import (smooth_sparse, lateral_recovery,
-    check_path, capability, recovery_minimum)
+    check_path, capability, recovery_minimum, curvature)
 
 
 EPS = 1e-6
@@ -376,6 +376,32 @@ def _required_braking(samples, curves, limits, stop, initial):
     return (distance, required) if required > EPS else None
 
 
+def _steering_stop_distance(geometry, distance, settings):
+    """Bound forward travel before curvature the configured vehicle cannot turn.
+
+    Speed reduction cannot solve a steering-radius violation. Inspect the same
+    source geometry used by curve limits, including support behind the ego,
+    but only within the reachable profile. No predecessor boundary is assumed.
+    """
+    if settings.wheelbase_m is None or settings.front_steer_max_rad is None:
+        return None  # Legacy inputs have no measured steering capability.
+    source, origin = geometry
+    points = [point for _, point in source]
+    maximum = math.tan(settings.front_steer_max_rad)/settings.wheelbase_m
+    for i in range(1, len(source)-1):
+        if source[i+1][0] < origin-EPS:
+            continue
+        if source[i-1][0] > origin+distance+EPS:
+            break
+        if abs(curvature(points, i)) <= maximum+EPS:
+            continue
+        if settings.front_offset_m is None or settings.half_width_m is None:
+            raise ValueError('steering-infeasible reference requires body extent for a safe stop')
+        front_reach = math.hypot(settings.front_offset_m, settings.half_width_m)
+        return max(0., source[i-1][0]-origin-front_reach-settings.lateral_margin_m)
+    return None
+
+
 def _hold(output, ego, emergency, reason, settings):
     # This is the repository's stop-request encoding, not a physical braking path.
     output.emergency_stop = emergency
@@ -475,6 +501,12 @@ def _moving_reference(output, perception, decision, settings):
     motion_bound = decision.stop_distance
     if signal_limit is not None:
         motion_bound = min(motion_bound, signal_limit) if motion_bound >= 0 else signal_limit
+    reachable = min(remaining, settings.horizon)
+    if motion_bound >= 0:
+        reachable = min(reachable, motion_bound)
+    steering_limit = _steering_stop_distance(geometry, reachable, settings)
+    if steering_limit is not None:
+        motion_bound = min(motion_bound, steering_limit) if motion_bound >= 0 else steering_limit
     obstacle_limit = (obstacle_stop(perception, reference, settings, clearance,
                                    decision.obstacle_clearances_m,
                                    motion_stop_distance=motion_bound)
@@ -482,6 +514,8 @@ def _moving_reference(output, perception, decision, settings):
     stop = remaining
     if signal_limit is not None:
         stop = min(stop, signal_limit)
+    if steering_limit is not None:
+        stop = min(stop, steering_limit)
     stopping = decision.mode == DecisionMode.STOP or decision.target_speed == 0
     if obstacle_limit is not None:
         stop = min(stop, obstacle_limit)
@@ -494,7 +528,9 @@ def _moving_reference(output, perception, decision, settings):
                             or decision.stop_distance >= 0 or obstacle_limit is not None
                             or signal_limit is not None)
     if stop <= EPS:
-        _hold(output, ego, ego.speed > EPS, "immediate stop requested", settings)
+        reason = ('steering curvature exceeds configured capability; immediate stop requested'
+                  if steering_limit is not None else 'immediate stop requested')
+        _hold(output, ego, ego.speed > EPS, reason, settings)
         return
     limits = upcoming_limits(perception, settings)
     horizon = min(settings.horizon, stop)
@@ -561,6 +597,8 @@ def _moving_reference(output, perception, decision, settings):
         output.reason = "clear-road lane reference; vehicle footprint and tracking not validated"
     if lane.forward_reference_valid is True:
         output.reason += "; forward reference: " + lane.forward_reference_status
+    if steering_limit is not None:
+        output.reason += '; stop before curvature exceeds configured steering capability'
     if limits:
         output.reason += "; upcoming speed limits applied: {0}".format(len(limits))
     if hard_approach:
