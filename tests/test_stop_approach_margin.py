@@ -57,9 +57,24 @@ class StopApproachMarginTests(unittest.TestCase):
         plant, now = BidirectionalPlant(speed=initial_speed, lag=lag), [0.0]
         calibration = vehicle()
         controller = ControlEngine(calibration, clock=lambda: now[0])
-        controller.integral = 3.4383475565878467
         decision = DecisionEngine(DecisionSettings(front_offset_m=3.9187))
         planning = PlannerSettings(front_offset_m=3.9187, half_width_m=.9)
+        warm = perception(speed=plant.speed, frame_id=0, ttl=30)
+        warm.ego.frame_id, warm.ego.age_ms = 0, 0
+        warm.scene_id, warm.task_id, warm.case_id = 10, 'synthetic-signal', 'synthetic-signal'
+        add_red_light(warm, 40)
+        warm.traffic.signal_state = 'GREEN'
+        warm.traffic.association_valid = True
+        warm.traffic.required, warm.traffic.signal_presence = True, 'present'
+        warm.source_status['traffic'] = dict(usable=True, quality='ok', association_valid=True)
+        warm_decision = DecisionTarget().bind(warm)
+        warm_decision.valid, warm_decision.target_speed = True, 6
+        warm_trajectory = build_trajectory(warm, warm_decision, planning)
+        self.assertTrue(controller.compute(warm, warm_trajectory).valid)
+        # Seed after the same-case initialization, so reset cannot erase the
+        # accumulated propulsion that the stop-approach test must exercise.
+        controller.integral = 3.4383475565878467
+        now[0] = .05
         held, restarted = False, False
         for frame in range(1, 461):
             p = perception(speed=plant.speed, frame_id=frame, ttl=30)

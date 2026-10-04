@@ -2,7 +2,7 @@
 
 import math
 
-from core.geometry import project_polyline
+from core.geometry import project_polyline, projection_within_polyline
 
 
 # Installed SDK Autopilot/util/GetSignType.h: SpeedLimit_Sign.
@@ -64,7 +64,7 @@ def speed_limit_observations(signs, signs_valid, ego, lane):
                 angle = float(sign["heading"])
                 if not math.isfinite(angle):
                     raise ValueError("bad heading")
-                if projection is None or not 0 <= projection["raw_ratio"] <= 1:
+                if not projection_within_polyline(projection, len(lane.center_line)):
                     item["reason"] = "sign_outside_lane_coverage"
                 elif math.cos(angle - projection["heading"]) > -0.5:
                     item["reason"] = "sign_faces_other_direction"

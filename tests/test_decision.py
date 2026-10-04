@@ -242,6 +242,7 @@ class DecisionTests(unittest.TestCase):
 
         # 7m of clearance with no closing speed is outside the emergency
         # envelope: the behaviour is to follow with a bounded speed demand.
+        self.engine.reset()  # This is a separate distance-classification case.
         p = perception(speed=5.0)
         add_target(p, longitudinal=9.0, speed=5.0, length=4.0)
         safe = self.run_engine(p)

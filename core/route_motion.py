@@ -7,14 +7,14 @@ Callers must establish map membership, route association and measured width.
 """
 import math
 
-from core.geometry import normalize_angle
+from core.geometry import normalize_angle, projection_within_polyline
 from core.validation import number
 
 
 def lateral_residual(points, projection, target, width):
     values = (target.heading, target.vx, target.vy, target.length, target.width, width)
     if (not all(number(v) for v in values) or min(target.length, target.width, width) <= 0
-            or not 0 <= projection['raw_ratio'] <= 1):
+            or not projection_within_polyline(projection, len(points))):
         return None
     heading = projection['heading']
     angle = normalize_angle(target.heading - heading)

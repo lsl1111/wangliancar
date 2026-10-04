@@ -4,7 +4,8 @@ import math
 import copy
 import time
 
-from core.geometry import calculate_ttc, speed_2d, world_to_ego, project_polyline
+from core.geometry import (calculate_ttc, speed_2d, world_to_ego, project_polyline,
+                           projection_within_polyline)
 from core.interfaces import EgoState, Perception, Target, TrafficControl
 from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
@@ -314,7 +315,7 @@ class PerceptionBuilder(object):
                     raise ValueError("invalid stopline")
                 stop = project_polyline(lane.center_line, sx, sy)
                 if (stop is None or stop["distance"] > max(2.0, lane.lane_width)
-                        or stop["raw_ratio"] < 0 or stop["raw_ratio"] > 1):
+                        or not projection_within_polyline(stop, len(lane.center_line))):
                     continue
                 distance = stop["s"] - origin["s"]
                 if distance < 0:

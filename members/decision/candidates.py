@@ -6,10 +6,11 @@ vehicle extent uncertainty remain explicit instead of becoming zero metres.
 """
 
 import math
-from core.route_segments import verified_spans
 from core.route_motion import lateral_residual
-from core.geometry import project_polyline, swept_path_distance
-from core.obstacle_geometry import longitudinal_extent
+from core.geometry import swept_path_distance
+from core.obstacle_geometry import longitudinal_extent, swept_footprint_intersects, footprint_entry
+from core.route_obstacles import (RouteContext, path_reference, motion_guard_distance,
+                                  motion_guard_time, front_reach_reference)
 from core.target_semantics import mapped_traffic_light
 
 
@@ -25,125 +26,6 @@ def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def _points(raw):
-    if not isinstance(raw, (list, tuple)) or not 2 <= len(raw) <= 20000:
-        return None
-    points = []
-    for item in raw:
-        if (not isinstance(item, (list, tuple)) or len(item) < 2
-                or not _finite(item[0]) or not _finite(item[1])):
-            return None
-        point = (float(item[0]), float(item[1]))
-        if not points or math.hypot(point[0] - points[-1][0],
-                                    point[1] - points[-1][1]) > EPS:
-            points.append(point)
-    return points if len(points) >= 2 else None
-
-
-def _length(points):
-    return sum(math.hypot(b[0] - a[0], b[1] - a[1])
-               for a, b in zip(points, points[1:]))
-
-
-def _project_unique(points, x, y, ambiguity_m, diagnostics=None):
-    """Find one bounded route projection, rejecting distant equal matches."""
-    best = None
-    contenders = []
-    along = 0.0
-    for index, (a, b) in enumerate(zip(points, points[1:])):
-        dx, dy = b[0] - a[0], b[1] - a[1]
-        length = math.hypot(dx, dy)
-        raw = ((x - a[0]) * dx + (y - a[1]) * dy) / (length * length)
-        ratio = max(0.0, min(1.0, raw))
-        px, py = a[0] + ratio * dx, a[1] + ratio * dy
-        distance = math.hypot(x - px, y - py)
-        progress = along + ratio * length
-        contenders.append((distance, progress))
-        if best is None or distance < best["distance"]:
-            best = {"s": progress, "distance": distance,
-                    "index": index, "raw_ratio": raw,
-                    "heading": math.atan2(dy, dx)}
-        along += length
-    if best is None:
-        if diagnostics is not None:
-            diagnostics["reason"] = "no_route_segment"
-        return None
-    if ((best["index"] == 0 and best["raw_ratio"] < -EPS)
-            or (best["index"] == len(points) - 2 and
-                best["raw_ratio"] > 1.0 + EPS)):
-        if diagnostics is not None:
-            diagnostics["reason"] = "outside_route_start_or_end"
-        return None
-    for distance, progress in contenders:
-        if (abs(distance - best["distance"]) <= 1e-3
-                and abs(progress - best["s"]) > ambiguity_m):
-            if diagnostics is not None:
-                diagnostics["reason"] = "multiple_route_positions"
-            return None
-    return best
-
-
-class RouteContext(object):
-    def __init__(self, perception, settings):
-        lane = perception.lane
-        self.current = _points(lane.center_line)
-        self.points = self.current
-        self.forward_ids = ()
-        self.spans = {}
-        self.projection_reason = ""
-        self.reference_status = lane.forward_reference_status
-        self.current_length = _length(self.current) if self.current else 0.0
-        self.ego_s = None
-        self.ego_heading = None
-        self.reason = ""
-        if self.current is None:
-            self.reason = "current lane centre line unavailable"
-            return
-        ego = perception.ego
-        anchor = _project_unique(self.current, ego.x, ego.y,
-                                 settings.route_ambiguity_m)
-        if anchor is None or anchor["distance"] > settings.projection_tolerance_m:
-            self.reason = "ego route projection unavailable or ambiguous"
-            return
-        self.ego_s = anchor["s"]
-        self.ego_heading = anchor["heading"]
-        if lane.forward_reference_valid is not True:
-            return
-        forward = _points(lane.forward_reference)
-        ids = lane.forward_lane_ids
-        if (forward is None or len(forward) < len(self.current)
-                or forward[:len(self.current)] != self.current
-                or not isinstance(ids, (list, tuple)) or not ids
-                or ids[0] != lane.lane_id or not all(isinstance(i, str) for i in ids)):
-            return
-        self.points = forward
-        self.forward_ids = tuple(ids[1:])
-        spans = getattr(lane, "forward_lane_spans", [])
-        # Only complete, contiguous metadata over the unchanged reference is
-        # trusted. Legacy inputs retain the conservative first-successor rule.
-        self.spans = verified_spans(len(self.current), len(forward), ids, spans)
-
-    def project(self, x, y, settings, lane_id=None):
-        self.projection_reason = ""
-        if self.ego_s is None or not (_finite(x) and _finite(y)):
-            self.projection_reason = "route_anchor_or_target_coordinates_unavailable"
-            return None
-        points, offset, index_offset = self.points, 0.0, 0
-        if lane_id in self.spans:
-            start, end = self.spans[lane_id]
-            points = self.points[start:end + 1]
-            offset = _length(self.points[:start + 1])
-            index_offset = start
-        diagnostics = {}
-        result = _project_unique(points, x, y, settings.route_ambiguity_m, diagnostics)
-        if result is None or result["distance"] > settings.projection_tolerance_m:
-            self.projection_reason = diagnostics.get("reason", "outside_route_corridor")
-            return None
-        result["s"] += offset
-        result["index"] += index_offset
-        return result
-
-
 class Candidate(object):
     def __init__(self, target):
         self.target = target
@@ -157,6 +39,8 @@ class Candidate(object):
         self.conflict = False
         self.stop_distance = None
         self.reason = ""
+        self.motion_relevant = True
+        self.coverage_stop_distance = None
 
 
 def build_candidate(target, ego, perception, route, settings):
@@ -213,15 +97,34 @@ def build_candidate(target, ego, perception, route, settings):
                  _finite(lane.lane_width) and lane.lane_width > 0.0
                  else settings.projection_tolerance_m)
     corridor = lane_half + (collision_extent if collision_extent is not None else settings.min_gap)
+    ahead_points = front_reach_reference(route.ahead(), settings.front_offset_m)
+    padding = (settings.half_width_m if settings.half_width_m is not None else lane_half)
+    padding += settings.motion_lateral_margin_m
+    guard_time = motion_guard_time(ego.speed, settings.motion_guard_time_s,
+                                   settings.motion_deceleration)
+    if settings.front_offset_m is not None and extent is not None:
+        distance = motion_guard_distance(ego.speed, settings.motion_horizon_m,
+                                         settings.motion_deceleration, settings.front_offset_m)
+        candidate.motion_relevant = swept_footprint_intersects(
+            path_reference(front_reach_reference(route.ahead(distance), settings.front_offset_m)),
+            target, padding, guard_time)
     if (candidate.relation not in (CURRENT_LANE, FORWARD_ROUTE)
             and target.lane_id not in lane.successor_lane_ids):
         # Failed bounded projection is not evidence of a collision. Evaluate
         # whether this object's footprint/sweep can touch the known ahead road.
-        anchor = project_polyline(route.current, ego.x, ego.y)
-        ahead_points = [anchor['point']] + route.points[anchor['index']+1:]
-        endpoint = (target.x + target.vx*settings.conflict_horizon_s,
-                    target.y + target.vy*settings.conflict_horizon_s)
-        if swept_path_distance(ahead_points, (target.x,target.y), endpoint) > corridor:
+        if extent is not None:
+            # The known orientation uses the same footprint sweep as planning.
+            # Vehicle length must not become an arbitrary sideways radius.
+            intersects = swept_footprint_intersects(path_reference(ahead_points),
+                                                    target, padding, guard_time)
+        else:
+            endpoint = (target.x + target.vx*guard_time, target.y + target.vy*guard_time)
+            intersects = swept_path_distance(ahead_points, (target.x,target.y), endpoint) <= corridor
+        if not intersects:
+            return candidate
+        if extent is not None and not candidate.motion_relevant:
+            # Planning retains the observed far-away footprint stop boundary;
+            # unsupported motion outside its local range is not an emergency.
             return candidate
     if projection is None and ego_longitudinal < -corridor:
         return candidate
@@ -232,14 +135,26 @@ def build_candidate(target, ego, perception, route, settings):
     if candidate.relation in (CURRENT_LANE, FORWARD_ROUTE):
         candidate.conflict = ahead or projection is None
     elif candidate.relation == OTHER_LANE:
-        overlap = collision_extent is not None and lateral <= collision_extent
-        candidate.conflict = (overlap or entering) and (ahead or projection is None)
+        candidate.conflict = ahead or projection is None
     else:
-        candidate.conflict = (lateral <= corridor or entering) and (
-            ahead or projection is None or ego_longitudinal > -corridor)
+        candidate.conflict = ((extent is not None or lateral <= corridor or entering)
+                              and (ahead or projection is None or ego_longitudinal > -corridor))
     if not candidate.conflict:
         return candidate
     if projection is None:
+        # A mapped vehicle beyond the known road may overlap only the front
+        # overhang at its last rear-axle pose. Stop the whole ego body inside
+        # coverage instead of inventing its lane or requiring standstill now.
+        # Unmapped/ambiguous targets and overlap inside coverage stay unknown.
+        known = path_reference(route.ahead())
+        if (candidate.relation == OTHER_LANE and target.same_lane_valid is True
+                and route.projection_reason == 'outside_route_start_or_end'
+                and extent is not None and settings.front_offset_m is not None and known):
+            entry = footprint_entry(path_reference(ahead_points), target, padding)
+            if entry is not None and entry >= known[-1][0] - EPS:
+                candidate.coverage_stop_distance = max(0.0, known[-1][0]
+                    - settings.front_offset_m - settings.obstacle_stop_margin)
+                return candidate
         candidate.reason = ("route projection unavailable or ambiguous: {0};"
                             "reference_status={1};target_lane={2}".format(
                                 route.projection_reason, route.reference_status, target.lane_id))
