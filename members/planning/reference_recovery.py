@@ -37,6 +37,29 @@ def _segment_distance(point, a, b):
     return math.hypot(point[0]-a[0]-ratio*dx, point[1]-a[1]-ratio*dy)
 
 
+def _straight_boundary(points):
+    """Drop redundant knots only after proving the entire side is straight.
+
+    Native straight roads can contain hundreds of collinear boundary knots.
+    Retaining all of them in every swept-body polygon test wastes the frame
+    budget. Monotone progress and sub-nanometre deviations preserve geometry;
+    any turn, fold or non-monotone side keeps every supplied knot.
+    """
+    a, b = points[0], points[-1]
+    dx, dy = b[0]-a[0], b[1]-a[1]
+    square = dx*dx+dy*dy
+    if square <= EPS*EPS:
+        return points
+    previous = 0.
+    for point in points:
+        ratio = ((point[0]-a[0])*dx+(point[1]-a[1])*dy)/square
+        if (ratio < previous or ratio > 1. or
+                math.hypot(point[0]-a[0]-ratio*dx, point[1]-a[1]-ratio*dy) > 1e-9):
+            return points
+        previous = ratio
+    return [a, b]
+
+
 def _corridor(lane):
     left, right = lane.left_boundary, lane.right_boundary
     if left or right:
@@ -44,9 +67,12 @@ def _corridor(lane):
             raise ValueError('recovery lane boundaries malformed')
         if len(left) < 2 or len(right) < 2:
             raise ValueError('recovery requires both lane boundaries')
-        polygon = [tuple(p[:2]) for p in left] + [tuple(p[:2]) for p in reversed(right)]
+        left = [tuple(p[:2]) for p in left]
+        right = [tuple(p[:2]) for p in right]
+        polygon = left + list(reversed(right))
         if not all(len(p) == 2 and all(number(v) for v in p) for p in polygon):
             raise ValueError('recovery lane boundaries nonfinite')
+        polygon = _straight_boundary(left) + list(reversed(_straight_boundary(right)))
         def contains(point):
             return _inside_polygon(point, polygon)
         contains.polygon = polygon
@@ -324,7 +350,14 @@ def lateral_recovery(reference, lane, ego, settings):
         raise ValueError('lateral recovery requires explicit vehicle/steering capability')
     # Search increasingly gradual blends, using geometry checks to select the
     # length instead of treating a fixed lateral error as physical failure.
-    minimum=max(2*settings.front_offset_m,2*settings.wheelbase_m)
+    # Bound the blend's added lateral acceleration as well as steering/body
+    # feasibility. The quintic offset basis has max |d2/du2| = 10*sqrt(3)/3;
+    # 6 conservatively bounds the heading-slope basis. A higher-speed small
+    # offset needs a longer return, rather than manufacturing a tight curve
+    # that the downstream speed profile can only handle by an emergency stop.
+    minimum=max(2*settings.front_offset_m,2*settings.wheelbase_m,
+        math.sqrt((10*math.sqrt(3)/3)*abs(offset)*ego.speed**2/settings.lateral_acceleration),
+        6*abs(slope)*ego.speed**2/settings.lateral_acceleration)
     candidates=[minimum*factor for factor in (1.,1.5,2.,3.,4.,6.)]
     for length in candidates:
         if length > available-settings.front_offset_m:

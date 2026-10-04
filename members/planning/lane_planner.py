@@ -134,6 +134,25 @@ def _clean_reference(raw):
     return points
 
 
+def _straight_reference(reference, distance):
+    """Small recentering must not reinterpret sampled road turn as pose error.
+
+    Curved tracking retains its original source geometry and curvature limits;
+    this extra blend is for a measured offset on a verified straight section.
+    EPS is the existing numerical geometry tolerance, not a scene threshold.
+    """
+    heading = None
+    for (s, a), (_, b) in zip(reference, reference[1:]):
+        if s >= distance-EPS:
+            break
+        segment = math.atan2(b[1]-a[1], b[0]-a[0])
+        if heading is None:
+            heading = segment
+        elif abs(normalize_angle(segment-heading)) > EPS:
+            return False
+    return heading is not None
+
+
 def _reference_ahead(lane, ego, settings):
     current_points = _clean_reference(lane.center_line)
     points = current_points
@@ -176,7 +195,22 @@ def _reference_ahead(lane, ego, settings):
         distances.append(distances[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
     if not all(number(s) for s in distances):
         raise ValueError("reference length overflow")
-    if original_projection['distance'] > settings.max_lateral_error:
+    # An accepted small pose error is still a discontinuity if the trajectory
+    # begins on the lane centre rather than at the measured rear axle. Low-speed
+    # tracking then tries to remove the whole offset within its short carrot.
+    # Use the same geometry-checked blend for ordinary recentering whenever
+    # measured capability and sufficient current route are available.
+    pose_error = original_projection['distance'] > EPS
+    current_remaining = (sum(math.hypot(b[0]-a[0], b[1]-a[1])
+                             for a,b in zip(current_points,current_points[1:]))
+                         - original_projection['s'])
+    blend_available = (capability(settings) and
+        min(distances[-1], current_remaining) >=
+        max(2*settings.front_offset_m, 2*settings.wheelbase_m) + settings.front_offset_m)
+    minor_blend = (pose_error and blend_available and
+                   _straight_reference(list(zip(distances, path)),
+                                       min(settings.horizon, current_remaining)))
+    if original_projection['distance'] > settings.max_lateral_error or minor_blend:
         path,recovery_length=lateral_recovery(list(zip(distances,path)),lane,ego,settings)
         distances=[0.]
         for a,b in zip(path,path[1:]):

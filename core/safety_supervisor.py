@@ -14,7 +14,7 @@ from core.scene_requirements import requires_targets
 from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.validation import current, number
 from core.target_semantics import mapped_traffic_light
-from core.route_obstacles import RouteContext, mapped_route_motion
+from core.route_obstacles import RouteContext, mapped_route_motion, route_footprint_relevant
 
 
 class SafetyAssessment(object):
@@ -170,6 +170,16 @@ class SafetySupervisor(object):
                                  or motion['lead_speed'] < -decision_settings.static_speed_threshold)):
                         return True
                     relevant = True
+                else:
+                    try:
+                        intersects = route_footprint_relevant(perception, target, route,
+                                                             planning_settings)
+                    except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
+                        intersects = None
+                    if intersects is False:
+                        continue
+                    if intersects is True:
+                        relevant = True
             if (getattr(target, "valid", False) and relevant
                     and type(distance) in (int, float) and math.isfinite(distance)
                     and distance > 0 and type(ttc) in (int, float)

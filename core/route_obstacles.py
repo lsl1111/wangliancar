@@ -6,7 +6,7 @@ each other's implementation. No output intent is used as collision evidence.
 import math
 
 from core.geometry import polyline_prefix, projection_within_polyline
-from core.obstacle_geometry import longitudinal_extent
+from core.obstacle_geometry import longitudinal_extent, swept_footprint_intersects
 from core.route_motion import lateral_residual
 from core.route_segments import verified_spans
 from core.validation import number
@@ -163,6 +163,47 @@ def motion_guard_time(speed, observation_time, deceleration):
             or speed < 0 or min(observation_time, deceleration) <= 0):
         raise ValueError('invalid obstacle motion guard time')
     return max(observation_time, speed/deceleration)
+
+
+def route_footprint_relevant(perception, target, route, planning_settings):
+    """Independent physical relevance, or None when evidence is incomplete.
+
+    The broad ego-axis band is only a fallback. With a verified road and
+    dimensions, a stationary roadside fixture must actually overlap the body
+    corridor. Moving targets retain their full constant-velocity sweep.
+    Include measured pose/heading error so off-centre ego motion is not erased.
+    This is an exclusion proof, not a trajectory intention or signal exemption.
+    """
+    lane, ego = perception.lane, perception.ego
+    if (route.anchor is None or lane.lane_width_valid is not True
+            or not number(lane.lane_width) or lane.lane_width <= 0
+            or not all(number(v) for v in (target.x, target.y, target.vx, target.vy,
+                                           target.length, target.width))
+            or min(target.length, target.width) <= 0
+            or not number(ego.heading)):
+        return None
+    distance = motion_guard_distance(ego.speed, planning_settings.horizon,
+                                     planning_settings.deceleration,
+                                     planning_settings.front_offset_m)
+    seconds = motion_guard_time(ego.speed, planning_settings.lateral_guard_time_s,
+                                planning_settings.deceleration)
+    points = route.ahead(distance)
+    # A lateral strip exactly encloses straight forward body travel. For an
+    # unassociated object on a bend it does not certify the front-corner sweep;
+    # keep the conservative TTC fallback rather than claim a clearance proof.
+    headings = [math.atan2(b[1]-a[1], b[0]-a[0]) for a,b in zip(points,points[1:])]
+    if not headings or any(abs(math.atan2(math.sin(h-headings[0]),
+                                         math.cos(h-headings[0]))) > EPS for h in headings):
+        return None
+    reference = path_reference(front_reach_reference(points,
+                                                     planning_settings.front_offset_m))
+    if len(reference) < 2:
+        return None
+    heading_error = ego.heading-route.ego_heading
+    padding = (planning_settings.half_width_m + planning_settings.lateral_margin_m
+               + route.anchor['distance']
+               + planning_settings.front_offset_m*abs(math.sin(heading_error)))
+    return swept_footprint_intersects(reference, target, padding, seconds)
 
 
 def mapped_route_motion(perception, target, route, settings, front_offset):
