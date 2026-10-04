@@ -6,12 +6,13 @@ vehicle extent uncertainty remain explicit instead of becoming zero metres.
 """
 
 import math
-from core.route_motion import lateral_residual
+from core.route_motion import lateral_residual, lateral_drift_bound
 from core.geometry import swept_path_distance
 from core.obstacle_geometry import longitudinal_extent, swept_footprint_intersects, footprint_entry
 from core.route_obstacles import (RouteContext, path_reference, motion_guard_distance,
                                   motion_guard_time, front_reach_reference)
 from core.target_semantics import mapped_traffic_light
+from core.traffic_quality import signal_stop_bound
 
 
 
@@ -40,6 +41,7 @@ class Candidate(object):
         self.stop_distance = None
         self.reason = ""
         self.motion_relevant = True
+        self.motion_supported = False
         self.coverage_stop_distance = None
 
 
@@ -105,6 +107,10 @@ def build_candidate(target, ego, perception, route, settings):
     if settings.front_offset_m is not None and extent is not None:
         distance = motion_guard_distance(ego.speed, settings.motion_horizon_m,
                                          settings.motion_deceleration, settings.front_offset_m)
+        signal_bound = signal_stop_bound(perception, settings.front_offset_m,
+                                        settings.traffic_stop_margin)
+        if signal_bound is not None and signal_bound > EPS:
+            distance = min(distance, signal_bound)
         candidate.motion_relevant = swept_footprint_intersects(
             path_reference(front_reach_reference(route.ahead(distance), settings.front_offset_m)),
             target, padding, guard_time)
@@ -180,6 +186,15 @@ def build_candidate(target, ego, perception, route, settings):
         candidate.stop_distance = max(0.0, candidate.distance - extent
                                       - settings.front_offset_m
                                       - settings.obstacle_stop_margin)
+        width = (lane.lane_width if candidate.relation == CURRENT_LANE and lane.lane_width_valid
+                 else getattr(target, 'lane_width_m', None))
+        try:
+            projection['_coverage_checked'] = True
+            lateral_drift_bound(target, projection, candidate.lateral_speed, width, guard_time,
+                                settings.motion_lateral_margin_m, settings.motion_tolerance_mps)
+            candidate.motion_supported = candidate.lead_speed >= -settings.motion_tolerance_mps
+        except ValueError:
+            pass
     return candidate
 
 

@@ -12,63 +12,36 @@ with targets can be marked valid.
 import math
 
 from core.geometry import project_polyline, polyline_prefix, projection_within_polyline
-from core.route_segments import verified_spans
-from core.route_motion import lateral_residual
+from core.route_motion import lateral_residual, lateral_drift_bound
 from core.obstacle_geometry import footprint_entry, swept_footprint_intersects
 from core.validation import number
 from core.target_semantics import mapped_traffic_light
 from core.route_obstacles import (motion_guard_distance, motion_guard_time,
-                                 front_reach_reference, path_reference)
+                                 front_reach_reference, path_reference, RouteContext)
 
 
 EPS = 1e-9
 
 
-def _route_association(perception, target):
+def _route_association(perception, target, settings, route=None):
     """A mapped successor uses its own segment tangent and measured width."""
     lane = perception.lane
     if target.same_lane_valid is not True:
         return None
-    current=lane.center_line
-    if lane.forward_reference_valid is not True:
-        if target.lane_id != lane.lane_id or not isinstance(current,(list,tuple)) or len(current)<2:
-            return None
-        forward=current
-        ids=[lane.lane_id]
-        explicit_spans=[]
-    else:
-        forward=lane.forward_reference
-        ids=lane.forward_lane_ids
-        explicit_spans=getattr(lane,'forward_lane_spans',[])
-    if (not isinstance(current, (list, tuple)) or not isinstance(forward, (list, tuple))
-            or len(current) < 2 or len(forward) < len(current)
-            or [tuple(p[:2]) for p in forward[:len(current)]] != [tuple(p[:2]) for p in current]
-            or not ids or ids[0] != lane.lane_id):
-        return None
-    points = [tuple(p[:2]) for p in forward]
-    if (not all(len(p) == 2 and all(number(v) for v in p) for p in points)
-            or any(math.hypot(b[0]-a[0], b[1]-a[1]) <= 1e-6
-                   for a, b in zip(points, points[1:]))):
-        return None
-    spans = verified_spans(len(current), len(forward), ids,explicit_spans)
-    if target.lane_id not in spans:
+    route = route if route is not None else RouteContext(perception, settings)
+    if (route.ego_s is None or (target.lane_id != lane.lane_id
+            and (target.lane_id not in route.forward_ids or target.lane_id not in route.spans))):
         return None
     width = (lane.lane_width if target.lane_id == lane.lane_id and lane.lane_width_valid
              else getattr(target, 'lane_width_m', None))
     if not number(width) or width <= 0.1:
         return None
-    start, end = spans[target.lane_id]
-    local = project_polyline(points[start:end+1], target.x, target.y)
-    anchor = project_polyline(points[:len(current)], perception.ego.x, perception.ego.y)
-    if (not projection_within_polyline(local,end-start+1) or anchor is None
-            or local['distance'] > width * 0.5):
+    local = route.project(target.x, target.y, settings, target.lane_id)
+    if local is None or local['distance'] > width*.5:
         return None
-    offset = sum(math.hypot(b[0]-a[0], b[1]-a[1])
-                 for a, b in zip(points[:start+1], points[1:start+1]))
-    local['s'] += offset - anchor['s']
-    local['index'] += start
+    local['s'] -= route.ego_s
     local['_coverage_checked']=True
-    local['_source_points']=points
+    local['_source_points']=route.points
     return local, width
 
 
@@ -80,30 +53,15 @@ def _lateral_drift(perception, target, projection, velocity, settings, route_wid
     The full drift expands the obstacle envelope even when motion falls under
     an explicitly configured tolerance.
     """
-    if abs(velocity) <= EPS:
-        return 0.0
     window = motion_guard_time(perception.ego.speed,settings.lateral_guard_time_s,
                                settings.deceleration)
-    drift = abs(velocity) * window
-    if not number(drift):
-        raise ValueError("nonfinite obstacle lateral drift")
-    if abs(velocity) <= settings.motion_tolerance_mps:
-        return drift
     lane = perception.lane
     width = route_width
     if width is None and (target.same_lane_valid is True and target.lane_id == lane.lane_id
                           and lane.lane_width_valid is True):
         width = lane.lane_width
-    if (not number(width) or width <= 0 or not number(target.heading)
-            or not projection.get('_coverage_checked',False)):
-        raise ValueError("crossing or oncoming obstacle motion unsupported")
-    angle = target.heading - projection["heading"]
-    lateral_extent = 0.5 * (target.length * abs(math.sin(angle))
-                            + target.width * abs(math.cos(angle)))
-    clearance = width * 0.5 - lateral_extent - settings.lateral_margin_m
-    if clearance <= 0 or projection["distance"] + drift > clearance:
-        raise ValueError("crossing or oncoming obstacle motion unsupported")
-    return drift
+    return lateral_drift_bound(target, projection, velocity, width, window,
+                               settings.lateral_margin_m, settings.motion_tolerance_mps)
 
 
 def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_m=None,
@@ -126,6 +84,7 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
         raise ValueError("obstacle-aware planning requires a usable Sensor API target frame")
     points = [point for _, point in reference]
     collision_reference=path_reference(front_reach_reference(points,settings.front_offset_m))
+    route = RouteContext(perception, settings)
     nearest = None
     for target in perception.targets:
         if mapped_traffic_light(target, perception):
@@ -143,7 +102,7 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
         if projection is None:
             raise ValueError("obstacle projection unavailable")
         projection['_coverage_checked']=projection_within_polyline(projection,len(points))
-        association = _route_association(perception, target)
+        association = _route_association(perception, target, settings, route)
         route_width = None
         if association is not None:
             projection, route_width = association

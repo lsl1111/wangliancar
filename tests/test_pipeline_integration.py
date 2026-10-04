@@ -304,7 +304,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 self.assertEqual(sdk.frames, len(sdk.lights))
                 for pipeline, native in zip(sdk.pipelines, sdk.sent):
                     self.assertEqual("DecisionEngine", pipeline["runtime"]["engine"])
-                    self.assertEqual("decision-constraints-v6", pipeline["runtime"]["version"])
+                    self.assertEqual("decision-constraints-v7", pipeline["runtime"]["version"])
                     self.assertEqual(3.0, pipeline["runtime"]["cruise_speed"])
                     frame = pipeline["perception_frame_id"]
                     for key in ("decision", "trajectory", "control"):

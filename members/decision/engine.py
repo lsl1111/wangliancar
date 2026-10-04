@@ -174,8 +174,7 @@ class DecisionEngine(object):
                 continue
             if (item.relation not in (candidates.CURRENT_LANE,
                                       candidates.FORWARD_ROUTE)
-                    or item.lead_speed < -settings.static_speed_threshold
-                    or abs(item.lateral_speed) > settings.static_speed_threshold):
+                    or not item.motion_supported):
                 if (not item.motion_relevant and item.stop_distance is not None
                         and item.relation in (candidates.CURRENT_LANE, candidates.FORWARD_ROUTE)):
                     result.add("STOP", "target", identifier,

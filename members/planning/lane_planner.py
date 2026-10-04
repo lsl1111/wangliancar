@@ -33,7 +33,8 @@ class PlannerSettings(object):
                  motion_tolerance_mps=0.0, lateral_guard_time_s=3.0,
                  curve_recovery_time_s=0.2, rear_offset_m=None, wheelbase_m=None,
                  front_steer_max_rad=None, max_lateral_acceleration_mps2=None,
-                 approach_deceleration_ratio=0.5, traffic_stop_margin=0.3):
+                 approach_deceleration_ratio=0.5, traffic_stop_margin=0.3,
+                 projection_tolerance_m=2.5, route_ambiguity_m=2.0):
         self.spacing = spacing
         self.horizon = horizon
         self.acceleration = acceleration
@@ -56,6 +57,8 @@ class PlannerSettings(object):
         self.max_lateral_acceleration_mps2 = max_lateral_acceleration_mps2
         self.approach_deceleration_ratio = approach_deceleration_ratio
         self.traffic_stop_margin = traffic_stop_margin
+        self.projection_tolerance_m = projection_tolerance_m
+        self.route_ambiguity_m = route_ambiguity_m
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -70,6 +73,8 @@ class PlannerSettings(object):
                             ("NEVC_PLANNING_HORIZON_M", "horizon"),
                             ("NEVC_PLANNING_APPROACH_DECELERATION_RATIO", "approach_deceleration_ratio"),
                             ("NEVC_DECISION_TRAFFIC_STOP_MARGIN", "traffic_stop_margin"),
+                            ("NEVC_DECISION_PROJECTION_TOLERANCE_M", "projection_tolerance_m"),
+                            ("NEVC_DECISION_ROUTE_AMBIGUITY_M", "route_ambiguity_m"),
                             ("NEVC_PLANNING_OBSTACLE_MARGIN_M", "obstacle_margin_m"),
                             ("NEVC_PLANNING_LATERAL_MARGIN_M", "lateral_margin_m"),
                             ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
@@ -419,9 +424,12 @@ def _moving_reference(output, perception, decision, settings):
         return
     clearance = (decision.obstacle_clearance_m
                  if decision.obstacle_clearance_m >= 0 else None)
+    motion_bound = decision.stop_distance
+    if signal_limit is not None:
+        motion_bound = min(motion_bound, signal_limit) if motion_bound >= 0 else signal_limit
     obstacle_limit = (obstacle_stop(perception, reference, settings, clearance,
                                    decision.obstacle_clearances_m,
-                                   motion_stop_distance=decision.stop_distance)
+                                   motion_stop_distance=motion_bound)
                       if perception.targets and not optional_unavailable else None)
     stop = remaining
     if signal_limit is not None:

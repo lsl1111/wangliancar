@@ -14,6 +14,7 @@ FIELDS = (
     "obstacle_stop_margin", "projection_tolerance_m", "route_ambiguity_m",
     "conflict_horizon_s", "recovery_frames", "release_frames",
     "motion_horizon_m", "motion_deceleration", "motion_guard_time_s", "motion_lateral_margin_m",
+    "motion_tolerance_mps",
 )
 INT_FIELDS = ("recovery_frames", "release_frames")
 DEPRECATED = ("launch_ttc_cap", "stop_margin")
@@ -51,6 +52,8 @@ def overrides_from_environment(environ=None):
     for key, field in (("NEVC_VEHICLE_HALF_WIDTH_M", "half_width_m"),
                        ("NEVC_PLANNING_HORIZON_M", "motion_horizon_m"),
                        ("NEVC_PLANNING_DECELERATION_MPS2", "motion_deceleration"),
+                       ("NEVC_PLANNING_DECELERATION_MPS2", "follow_deceleration"),
+                       ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
                        ("NEVC_PLANNING_LATERAL_GUARD_TIME_S", "motion_guard_time_s"),
                        ("NEVC_PLANNING_LATERAL_MARGIN_M", "motion_lateral_margin_m")):
         if key in environ:
@@ -75,7 +78,8 @@ class DecisionSettings(object):
                  conflict_horizon_s=3.0, recovery_frames=3,
                  release_frames=2, approach_deceleration_ratio=0.5,
                  half_width_m=None, motion_horizon_m=60.0, motion_deceleration=2.0,
-                 motion_guard_time_s=3.0, motion_lateral_margin_m=0.0):
+                 motion_guard_time_s=3.0, motion_lateral_margin_m=0.0,
+                 motion_tolerance_mps=0.0):
         for name in FIELDS:
             setattr(self, name, locals()[name])
 

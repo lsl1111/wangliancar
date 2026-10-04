@@ -34,6 +34,10 @@ def _validate_motion_contract(planning, decision):
              ("half_width_m", "half_width_m"),
              ("horizon", "motion_horizon_m"),
              ("deceleration", "motion_deceleration"),
+             ("deceleration", "follow_deceleration"),
+             ("motion_tolerance_mps", "motion_tolerance_mps"),
+             ("projection_tolerance_m", "projection_tolerance_m"),
+             ("route_ambiguity_m", "route_ambiguity_m"),
              ("lateral_guard_time_s", "motion_guard_time_s"),
              ("lateral_margin_m", "motion_lateral_margin_m"),
              ("traffic_stop_margin", "traffic_stop_margin"))

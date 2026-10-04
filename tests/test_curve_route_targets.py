@@ -45,6 +45,9 @@ class CurveRouteTargetTests(unittest.TestCase):
         angle = math.radians(110)
         target.x, target.y = 12 * math.sin(angle), 12 * (1 - math.cos(angle))
         target.vx, target.vy = 5 * math.cos(angle), 5 * math.sin(angle)
+        # Like the map-associated Sensor producer, supply this successor's
+        # measured width and the vehicle's actual body yaw on the curve.
+        target.heading, target.lane_width_m = angle, 3.5
         return p
 
     def test_sdk_scale_sample_gap_no_longer_cuts_route_or_loses_lead(self):
@@ -149,6 +152,19 @@ class CurveRouteTargetTests(unittest.TestCase):
         replay = _assign(Perception(), payload, 'perception')
         self.assertEqual([], replay.lane.forward_lane_spans)
         self.assertEqual(DecisionMode.STOP, DecisionEngine(self.settings).run(replay).mode)
+
+    def test_missing_or_contradictory_successor_motion_geometry_is_not_follow_permission(self):
+        for change in ('width', 'heading', 'contradictory_heading'):
+            p = self.observation()
+            if change == 'width': p.targets[0].lane_width_m = None
+            if change == 'heading': p.targets[0].heading = None
+            if change == 'contradictory_heading': p.targets[0].heading = 0
+            decision = DecisionEngine(self.settings).run(p)
+            self.assertEqual(DecisionMode.STOP, decision.mode, (change, decision.reason))
+            trajectory = build_trajectory(p, decision,
+                PlannerSettings(front_offset_m=3.9187, half_width_m=.9))
+            self.assertTrue(trajectory.valid, trajectory.reason)
+            self.assertTrue(all(point.speed == 0 for point in trajectory.points))
 
     def test_wider_xy_tolerance_does_not_relax_height_or_heading(self):
         for first in ((20.15, 0, 0.11), (20.15, 0, 0)):
