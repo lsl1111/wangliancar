@@ -338,6 +338,13 @@ def smooth_sparse(points, current_count, lane, ego, settings):
     return result,new_current_count,True
 
 
+def recovery_minimum(offset, heading_error, speed, settings):
+    """Length bound shared by comfort admission and actual candidate search."""
+    return max(2*settings.front_offset_m, 2*settings.wheelbase_m,
+        math.sqrt((10*math.sqrt(3)/3)*abs(offset)*speed**2/settings.lateral_acceleration),
+        6*abs(math.tan(heading_error))*speed**2/settings.lateral_acceleration)
+
+
 def lateral_recovery(reference, lane, ego, settings):
     """Quintic offset blend, body/curvature checked before accepting a candidate."""
     points=[point for _,point in reference]
@@ -355,9 +362,7 @@ def lateral_recovery(reference, lane, ego, settings):
     # 6 conservatively bounds the heading-slope basis. A higher-speed small
     # offset needs a longer return, rather than manufacturing a tight curve
     # that the downstream speed profile can only handle by an emergency stop.
-    minimum=max(2*settings.front_offset_m,2*settings.wheelbase_m,
-        math.sqrt((10*math.sqrt(3)/3)*abs(offset)*ego.speed**2/settings.lateral_acceleration),
-        6*abs(slope)*ego.speed**2/settings.lateral_acceleration)
+    minimum=recovery_minimum(offset, normalize_angle(ego.heading-angle), ego.speed, settings)
     candidates=[minimum*factor for factor in (1.,1.5,2.,3.,4.,6.)]
     for length in candidates:
         if length > available-settings.front_offset_m:

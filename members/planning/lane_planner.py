@@ -17,7 +17,7 @@ from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from members.planning.obstacle_guard import obstacle_stop
 from members.planning.speed_constraints import upcoming_limits, speed_caps
 from members.planning.reference_recovery import (smooth_sparse, lateral_recovery,
-    check_path, capability)
+    check_path, capability, recovery_minimum)
 
 
 EPS = 1e-6
@@ -204,9 +204,23 @@ def _reference_ahead(lane, ego, settings):
     current_remaining = (sum(math.hypot(b[0]-a[0], b[1]-a[1])
                              for a,b in zip(current_points,current_points[1:]))
                          - original_projection['s'])
-    blend_available = (capability(settings) and
-        min(distances[-1], current_remaining) >=
-        max(2*settings.front_offset_m, 2*settings.wheelbase_m) + settings.front_offset_m)
+    blend_available = False
+    if capability(settings):
+        heading_error = normalize_angle(ego.heading-heading)
+        # Boundaries describe only the current lane, not its predecessor or
+        # successors. A rear axle can enter a new segment while its tail is
+        # still in the preceding one. Do not make an optional comfort blend
+        # demand unavailable corridor coverage at that artificial map seam.
+        rear_reach = (settings.rear_offset_m*math.cos(heading_error) +
+                      settings.half_width_m*abs(math.sin(heading_error)))
+        minimum = recovery_minimum(original_projection['distance'], heading_error,
+                                   ego.speed, settings)
+        # The full body must also fit ahead throughout the shortest candidate;
+        # a forward centreline alone does not provide successor boundaries.
+        front_reach = math.hypot(settings.front_offset_m, settings.half_width_m)
+        blend_available = (original_projection['s'] >= rear_reach+settings.lateral_margin_m+EPS
+            and min(distances[-1], current_remaining, settings.horizon) >=
+            minimum+front_reach+settings.lateral_margin_m+EPS)
     minor_blend = (pose_error and blend_available and
                    _straight_reference(list(zip(distances, path)),
                                        min(settings.horizon, current_remaining)))

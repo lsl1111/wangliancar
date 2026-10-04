@@ -204,6 +204,97 @@ class StraightMotionHandoffTests(unittest.TestCase):
             now[0] += .05
         self.assertGreater(plant.x, 30.)
 
+    def test_optional_recenter_does_not_require_predecessor_body_coverage(self):
+        for boundaries in (True, False):
+            for offset in (-.12, -1.3e-6, 1.3e-6, .12):
+                for speed in (0., 2.7):
+                    p = self.sample(x=-4.92, y=offset, speed=speed)
+                    p.lane.predecessor_lane_ids = ['previous']
+                    p.lane.lane_width_valid, p.lane.lane_width = True, 3.5
+                    if not boundaries:
+                        p.lane.left_boundary, p.lane.right_boundary = [], []
+                    d, t, safety = self.safety(p)
+                    self.assertTrue(t.valid and not t.emergency_stop, t.reason)
+                    self.assertEqual('normal', safety.mode, safety.reason)
+                    self.assertNotIn('lateral recovery', t.reason)
+
+    def test_required_large_offset_recovery_still_requires_complete_corridor(self):
+        p = self.sample(x=-4.92, y=.6, speed=2.7)
+        p.lane.predecessor_lane_ids = ['previous']
+        d, t, safety = self.safety(p)
+        self.assertFalse(t.valid, t.reason)
+        self.assertEqual('trajectory_invalid_or_expired', safety.reason)
+
+    def test_speed_dependent_blend_cannot_borrow_successor_boundaries(self):
+        p = self.sample(x=2., y=.3, speed=8.)
+        p.lane.center_line = [(float(i), 0.) for i in range(-5, 15)]
+        p.lane.left_boundary = [(-5., 1.75), (14., 1.75)]
+        p.lane.right_boundary = [(-5., -1.75), (14., -1.75)]
+        p.lane.forward_reference_valid = True
+        p.lane.forward_reference = p.lane.center_line + [(float(i), 0.) for i in range(15, 105)]
+        p.lane.forward_lane_ids = [p.lane.lane_id, 'next']
+        p.lane.forward_reference_status = 'map_end'
+        d, t, safety = self.safety(p)
+        self.assertTrue(t.valid and not t.emergency_stop, t.reason)
+        self.assertEqual('normal', safety.mode, safety.reason)
+        self.assertNotIn('lateral recovery', t.reason)
+
+    def test_short_planning_horizon_does_not_force_incomplete_comfort_blend(self):
+        for horizon in (8., 10.):
+            self.ps.horizon = horizon
+            p = self.sample(y=.12)
+            d, t, safety = self.safety(p)
+            self.assertTrue(t.valid and not t.emergency_stop, t.reason)
+            self.assertEqual('normal', safety.mode, safety.reason)
+            self.assertNotIn('lateral recovery', t.reason)
+
+    def test_red_green_restart_crosses_lane_seams_without_fault_braking(self):
+        plant = BidirectionalPlant(x=2., y=1.3e-6)
+        now = [0.]
+        control = ControlEngine(self.calibration, clock=lambda: now[0])
+        decision = DecisionEngine(self.ds)
+        supervisor = SafetySupervisor(SimpleNamespace(), planning_settings=self.ps,
+                                      decision_settings=self.ds)
+        red_stopped = False
+        crossed = set()
+        for frame in range(1, 851):
+            p = self.sample(plant.x, plant.y, plant.heading, plant.speed, frame)
+            # Floating-point GPS samples need not converge below the numerical
+            # geometry epsilon, even when the actual car tracks the centre.
+            p.ego.y += 2e-6 if frame % 2 else -2e-6
+            p.ego.yaw_rate = plant.yaw_rate
+            start, end, name = ((-5, 15, 'before') if plant.x < 15 else
+                                (15, 35, 'middle') if plant.x < 35 else (35, 204, 'after'))
+            crossed.add(name)
+            p.lane.lane_id = name
+            p.lane.center_line = [(float(i), 0.) for i in range(start, end+1)]
+            p.lane.left_boundary = [(float(start), 1.75), (float(end), 1.75)]
+            p.lane.right_boundary = [(float(start), -1.75), (float(end), -1.75)]
+            p.lane.forward_reference = p.lane.center_line + [(float(i), 0.) for i in range(end+1, 205)]
+            p.lane.forward_reference_valid = True
+            p.lane.forward_lane_ids = [name] + (['later'] if end < 204 else [])
+            p.lane.forward_reference_status = 'map_end'
+            p.traffic.observed, p.traffic.valid, p.traffic.association_valid = True, True, True
+            p.traffic.signal_state = 'RED' if frame <= 250 else 'GREEN'
+            p.traffic.stop_line_distance = 18.-plant.x
+            p.source_status['traffic'] = {'association_valid': True, 'usable': True}
+            d = decision.run(p)
+            t = build_trajectory(p, d, self.ps)
+            c = control.compute(p, t)
+            self.assertTrue(t.valid and not t.emergency_stop, (frame, t.reason))
+            self.assertTrue(c.valid, (frame, c.errors))
+            safety = supervisor.evaluate(p, d, t, c)
+            self.assertEqual('normal', safety.mode, (frame, safety.reason))
+            if frame <= 250:
+                self.assertLessEqual(plant.x+self.ps.front_offset_m, 18.)
+                red_stopped = red_stopped or (frame > 150 and plant.speed < .1)
+            plant.step(c, .05, self.calibration)
+            now[0] += .05
+        self.assertTrue(red_stopped)
+        self.assertEqual({'before', 'middle', 'after'}, crossed)
+        self.assertGreater(plant.x, 45.)
+        self.assertGreater(plant.speed, 3., (plant.x, d.reason, t.reason, c.diagnostics))
+
     def test_recentered_pose_still_obeys_original_signal_stop_boundary(self):
         p = self.sample(y=.12, speed=2.)
         p.traffic.observed, p.traffic.valid, p.traffic.association_valid = True, True, True
