@@ -35,7 +35,8 @@ def _validate_motion_contract(planning, decision):
              ("horizon", "motion_horizon_m"),
              ("deceleration", "motion_deceleration"),
              ("lateral_guard_time_s", "motion_guard_time_s"),
-             ("lateral_margin_m", "motion_lateral_margin_m"))
+             ("lateral_margin_m", "motion_lateral_margin_m"),
+             ("traffic_stop_margin", "traffic_stop_margin"))
     for planning_name, decision_name in pairs:
         left, right = getattr(planning, planning_name), getattr(decision, decision_name)
         if left is None and right is None:

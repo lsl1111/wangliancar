@@ -13,7 +13,7 @@ from core.geometry import (normalize_angle, project_polyline, opposes_direction,
 from core.interfaces import DecisionMode, DecisionTarget, Perception, Trajectory, TrajectoryPoint
 from core.validation import current, number, validate_output
 from core.scene_requirements import requires_targets
-from core.traffic_quality import traffic_required, traffic_usable, bounded_signal_stop
+from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from members.planning.obstacle_guard import obstacle_stop
 from members.planning.speed_constraints import upcoming_limits, speed_caps
 from members.planning.reference_recovery import (smooth_sparse, lateral_recovery,
@@ -33,7 +33,7 @@ class PlannerSettings(object):
                  motion_tolerance_mps=0.0, lateral_guard_time_s=3.0,
                  curve_recovery_time_s=0.2, rear_offset_m=None, wheelbase_m=None,
                  front_steer_max_rad=None, max_lateral_acceleration_mps2=None,
-                 approach_deceleration_ratio=0.5):
+                 approach_deceleration_ratio=0.5, traffic_stop_margin=0.3):
         self.spacing = spacing
         self.horizon = horizon
         self.acceleration = acceleration
@@ -55,6 +55,7 @@ class PlannerSettings(object):
         self.front_steer_max_rad = front_steer_max_rad
         self.max_lateral_acceleration_mps2 = max_lateral_acceleration_mps2
         self.approach_deceleration_ratio = approach_deceleration_ratio
+        self.traffic_stop_margin = traffic_stop_margin
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -68,6 +69,7 @@ class PlannerSettings(object):
                             ("NEVC_VEHICLE_MAX_LATERAL_ACCELERATION_MPS2", "max_lateral_acceleration_mps2"),
                             ("NEVC_PLANNING_HORIZON_M", "horizon"),
                             ("NEVC_PLANNING_APPROACH_DECELERATION_RATIO", "approach_deceleration_ratio"),
+                            ("NEVC_DECISION_TRAFFIC_STOP_MARGIN", "traffic_stop_margin"),
                             ("NEVC_PLANNING_OBSTACLE_MARGIN_M", "obstacle_margin_m"),
                             ("NEVC_PLANNING_LATERAL_MARGIN_M", "lateral_margin_m"),
                             ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
@@ -86,7 +88,7 @@ class PlannerSettings(object):
                         "front_steer_max_rad", "max_lateral_acceleration_mps2") and value is None:
                 continue
             if (not number(value) or value < 0.0 or
-                    (name not in ("lateral_margin_m", "motion_tolerance_mps")
+                    (name not in ("lateral_margin_m", "motion_tolerance_mps", "traffic_stop_margin")
                      and value <= EPS)):
                 raise ValueError("planner setting {0} must be finite and positive".format(name))
         if (self.front_offset_m is None) != (self.half_width_m is None):
@@ -386,9 +388,18 @@ def _moving_reference(output, perception, decision, settings):
         return
     if lane.valid is not True:
         raise ValueError("map lane unavailable")
-    if (traffic_required(perception) and not traffic_usable(perception)
-            and not bounded_signal_stop(perception, decision)):
-        raise ValueError('applicable signal unavailable without a verified stop-line request')
+    signal_stop = signal_stop_requirement(perception)
+    signal_limit = None
+    if signal_stop is not None:
+        if settings.front_offset_m is None:
+            raise ValueError('vehicle front required for signal stopping')
+        signal_limit = signal_stop_bound(perception, settings.front_offset_m,
+                                        settings.traffic_stop_margin)
+        if signal_limit is None:
+            raise ValueError('applicable signal unavailable without a verified stop-line boundary')
+        if (signal_stop.get('state_known') is not True
+                and (decision.stop_distance < 0 or decision.stop_distance > signal_limit+1e-6)):
+            raise ValueError('unresolved signal requires a bounded decision stop request')
     # Keep source and geometry gates before applying any motion envelope.
     status = perception.source_status.get("targets", {})
     optional_unavailable = (not requires_targets(perception.scene_id)
@@ -413,6 +424,8 @@ def _moving_reference(output, perception, decision, settings):
                                    motion_stop_distance=decision.stop_distance)
                       if perception.targets and not optional_unavailable else None)
     stop = remaining
+    if signal_limit is not None:
+        stop = min(stop, signal_limit)
     stopping = decision.mode == DecisionMode.STOP or decision.target_speed == 0
     if obstacle_limit is not None:
         stop = min(stop, obstacle_limit)
@@ -422,7 +435,8 @@ def _moving_reference(output, perception, decision, settings):
         stop = min(stop, ego.speed ** 2 / (2 * settings.deceleration))
     output.stop_distance = stop
     output.stop_required = (stopping or stop <= settings.horizon
-                            or decision.stop_distance >= 0 or obstacle_limit is not None)
+                            or decision.stop_distance >= 0 or obstacle_limit is not None
+                            or signal_limit is not None)
     if stop <= EPS:
         _hold(output, ego, ego.speed > EPS, "immediate stop requested", settings)
         return

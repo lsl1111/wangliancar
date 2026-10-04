@@ -10,6 +10,7 @@ import json
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 from core.interfaces import DecisionMode, Perception, Target, TrafficControl
 from core.serialization import to_dict
@@ -601,7 +602,11 @@ class DecisionTests(unittest.TestCase):
         p = perception(speed=5.0)
         add_red_light(p, 30.0)
         decision = self.run_engine(p)
-        trajectory = plan(p, decision)
+        # Planner independently verifies the signal front boundary using the
+        # same explicit body geometry as the decision engine and launcher.
+        with patch.dict(os.environ, {'NEVC_VEHICLE_FRONT_OFFSET_M': '3.5',
+                                     'NEVC_VEHICLE_HALF_WIDTH_M': '.9'}):
+            trajectory = plan(p, decision)
         self.assertTrue(trajectory.valid, trajectory.reason)
         self.assertTrue(trajectory.stop_required)
 

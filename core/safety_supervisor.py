@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from core.interfaces import ControlOut, DecisionMode
 from core.scene_requirements import requires_targets
-from core.traffic_quality import traffic_required, traffic_usable, bounded_signal_stop
+from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.validation import current, number
 from core.target_semantics import mapped_traffic_light
 from core.route_obstacles import RouteContext, mapped_route_motion
@@ -43,6 +43,10 @@ class SafetySupervisor(object):
         self.controlled_brake = self._brake(getattr(config, "safety_controlled_brake", 0.3))
         self.emergency_brake = self._brake(getattr(config, "safety_emergency_brake", 1.0))
         self.normal_control_required = bool(getattr(config, "send_control", False))
+        self.signal_stop_margin = getattr(planning_settings, 'traffic_stop_margin',
+                                         getattr(decision_settings, 'traffic_stop_margin', .3))
+        if not number(self.signal_stop_margin) or self.signal_stop_margin < 0:
+            raise ValueError('invalid safety traffic stop margin')
         self.last_case = None
         self.last_frame = None
         self.last_frame_at = None
@@ -86,6 +90,34 @@ class SafetySupervisor(object):
         if not math.isfinite(value) or not 0.0 < value <= 1.0:
             raise ValueError("safety brake must be finite and in (0, 1]")
         return value
+
+    def _signal_guard(self, perception, decision, trajectory):
+        requirement = signal_stop_requirement(perception)
+        if requirement is None:
+            return ''
+        front = self.collision_settings.front_offset_m
+        # Legacy callers without body data can still verify the old rear-axle
+        # bound; runtime always supplies the shared measured front offset.
+        bound = signal_stop_bound(perception, front, self.signal_stop_margin if front is not None else 0.)
+        if (bound is None or not current(decision, perception)
+                or not current(trajectory, decision) or trajectory.stop_required is not True
+                or not number(trajectory.stop_distance)
+                or not 0 <= trajectory.stop_distance <= bound+1e-6):
+            return ('required_traffic_unavailable' if bound is None or requirement.get('state_known') is not True
+                    else 'traffic_stop_constraint_missing')
+        if (requirement.get('state_known') is not True
+                and (not number(decision.stop_distance) or decision.stop_distance < 0
+                     or decision.stop_distance > bound+1e-6
+                     or trajectory.stop_distance > decision.stop_distance+1e-6)):
+            return 'required_traffic_unavailable'
+        route = RouteContext(perception, self.route_settings)
+        if route.ego_s is None or not trajectory.points:
+            return 'traffic_trajectory_boundary_unverified'
+        for point in trajectory.points:
+            projection = route.project(point.x, point.y, self.route_settings)
+            if projection is None or projection['s']-route.ego_s > bound+1e-6:
+                return 'traffic_trajectory_crosses_boundary'
+        return ''
 
     def reset(self, require_recovery=False):
         self.last_frame = None
@@ -179,6 +211,7 @@ class SafetySupervisor(object):
             self.last_good_header = (perception.frame_id, perception.timestamp)
             self.last_good_at = now
 
+        signal_fault = self._signal_guard(perception, decision, trajectory) if gps_ok else ''
         mode, reason = "normal", ""
         if not gps_ok:
             mode, reason = "fault_stop", "gps_invalid_or_expired"
@@ -196,14 +229,8 @@ class SafetySupervisor(object):
                    or not getattr(perception, "target_source", "").startswith("sensor:")
                    or not self._target_records_valid(perception))):
             mode, reason = "controlled_stop", "required_targets_unavailable"
-        elif (traffic_required(perception) and not traffic_usable(perception)
-              and not (current(decision, perception)
-                       and bounded_signal_stop(perception, decision)
-                       and current(trajectory, decision)
-                       and trajectory.stop_required is True
-                       and number(trajectory.stop_distance)
-                       and 0 <= trajectory.stop_distance <= decision.stop_distance)):
-            mode, reason = 'controlled_stop', 'required_traffic_unavailable'
+        elif signal_fault:
+            mode, reason = 'controlled_stop', signal_fault
         elif (current(decision, perception)
               and decision.mode == DecisionMode.EMERGENCY_BRAKE):
             mode, reason = "emergency_stop", "collision_or_emergency_request"

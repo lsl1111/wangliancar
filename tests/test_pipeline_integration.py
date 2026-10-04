@@ -160,7 +160,9 @@ class SimulatedSDK(object):
         def line(y):
             return Vector([SimpleNamespace(x=float(x), y=y, z=0.0)
                            for x in range(161)])
-        signal = SimpleNamespace(id=42, pt=SimpleNamespace(x=25.0, y=0.0))
+        signal = SimpleNamespace(id=42, pt=SimpleNamespace(x=25.0, y=0.0),
+            validities=Vector([SimpleNamespace(roadId=1, sectionIndex=0,
+                                               fromLaneId=-1, toLaneId=-1)]))
         stopline = SimpleNamespace(pt=SimpleNamespace(x=25.0, y=0.0))
         adapter.hdmap = SimpleNamespace(
             pySimPoint3D=lambda *args: args, pySimString=lambda value: value,
@@ -302,7 +304,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 self.assertEqual(sdk.frames, len(sdk.lights))
                 for pipeline, native in zip(sdk.pipelines, sdk.sent):
                     self.assertEqual("DecisionEngine", pipeline["runtime"]["engine"])
-                    self.assertEqual("decision-constraints-v5", pipeline["runtime"]["version"])
+                    self.assertEqual("decision-constraints-v6", pipeline["runtime"]["version"])
                     self.assertEqual(3.0, pipeline["runtime"]["cruise_speed"])
                     frame = pipeline["perception_frame_id"]
                     for key in ("decision", "trajectory", "control"):

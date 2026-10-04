@@ -10,11 +10,12 @@ import threading
 import time
 
 from core.interfaces import ControlOut
+from core.map_scope import matches_lane
 from simone_platform.evaluation import LocalEvaluation
 from simone_platform.sdk_compat import polling_structs
 from simone_platform.sensor_catalog import (TARGET_INGESTION_VERSION, sensor_kind,
                                            target_sensor_ids)
-from simone_platform.map_observations import MapObservationReader
+from simone_platform.map_observations import MapObservationReader, vector_items
 
 
 def _decode_sdk_text(value):
@@ -784,6 +785,22 @@ class SimOneAdapter(object):
             count = int(traffic_light_list.Size()) if traffic_light_list else 0
             for index in range(count):
                 light = traffic_light_list.GetElement(index)
+                scopes = None
+                scope_confirmed = False
+                if hasattr(light, 'validities'):
+                    # This binding's stop-line lookup can return a road's line
+                    # even for a light whose explicit validity excludes the lane.
+                    try:
+                        scopes = [dict(road_id=int(scope.roadId), section_index=int(scope.sectionIndex),
+                                       from_lane_id=int(scope.fromLaneId), to_lane_id=int(scope.toLaneId))
+                                  for scope in vector_items(light.validities)]
+                        if not matches_lane(scopes, lane_id):
+                            continue
+                        scope_confirmed = True
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        # Keep an actually returned line as an unresolved
+                        # applicability fact; do not fail the whole catalog.
+                        pass
                 stoplines = self.hdmap.getStoplineList(light, self.hdmap.pySimString(lane_id))
                 if stoplines is None:
                     return lights  # unknown association, not confirmed absence
@@ -805,6 +822,16 @@ class SimOneAdapter(object):
                         sx = float(stopline.pt.x)
                         sy = float(stopline.pt.y)
                     point = {'stop_line_x': sx, 'stop_line_y': sy}
+                    point['signal_scope_valid'] = scope_confirmed
+                    if scopes is not None:
+                        point['signal_validities'] = copy.deepcopy(scopes)
+                    front = getattr(light, 'heading', None)
+                    if front is not None and hasattr(front, 'x') and hasattr(front, 'y'):
+                        hx, hy = float(front.x), float(front.y)
+                        if not all(math.isfinite(v) for v in (hx, hy)):
+                            raise ValueError('invalid signal heading')
+                        if math.hypot(hx, hy) > 1e-9:
+                            point['signal_heading'] = math.atan2(hy, hx)
                     if boundary is not None:
                         point['stop_line_boundary'] = boundary
                     stop_points.append(point)

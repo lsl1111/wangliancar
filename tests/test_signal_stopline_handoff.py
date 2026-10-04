@@ -223,8 +223,10 @@ class SignalStoplineHandoffTests(unittest.TestCase):
                 adapter.hdmap.getStoplineList = lambda signal, identity: (
                     Vector([stop]) if identity == '1_0_-1' else Vector())
                 adapter.hdmap.getTrafficLightList = lambda: Vector([
-                    SimpleNamespace(id=51, pt=SimpleNamespace(x=45, y=1)),
-                    SimpleNamespace(id=52, pt=SimpleNamespace(x=45, y=-1))])
+                    SimpleNamespace(id=identity, pt=SimpleNamespace(x=45, y=y),
+                        validities=Vector([SimpleNamespace(roadId=1, sectionIndex=0,
+                                                           fromLaneId=-1, toLaneId=-1)]))
+                    for identity, y in ((51, 1), (52, -1))])
                 def state(vehicle, identity, native):
                     native.status, native.countDown = (1 if self.reads < 440 else 2), 10
                     return True

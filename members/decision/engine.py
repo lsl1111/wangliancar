@@ -8,7 +8,7 @@ import math
 
 from core.interfaces import DecisionMode, DecisionTarget
 from core.geometry import opposes_direction
-from core.traffic_quality import traffic_required, traffic_usable, can_approach_signal
+from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.scene_requirements import requires_targets, FOLLOW_SCENES, AEB_SCENES
 
 from members.decision import candidates, protocol, speed_policy
@@ -113,24 +113,25 @@ class DecisionEngine(object):
     def _collect(self, perception, route, ego_speed, cruising, distinct):
         result = ConstraintSet(cruising)
         settings = self.settings
-        traffic = perception.traffic
-        if (protocol.traffic_requires_stop(traffic)
-                or (traffic_required(perception) and not traffic_usable(perception))):
+        signal_stop = signal_stop_requirement(perception)
+        if signal_stop is not None:
+            signal_ids = signal_stop['signal_ids']
+            signal_id = signal_ids[0] if len(signal_ids) == 1 else -1
             if settings.front_offset_m is None:
-                result.add("PROTECT", "traffic", traffic.signal_id,
+                result.add("PROTECT", "traffic", signal_id,
                            "TRAFFIC_DISTANCE:vehicle_front_unknown",
                            valid_until=perception.valid_until)
             else:
-                distance = protocol.traffic_stop_distance(
-                    traffic, settings.front_offset_m + settings.traffic_stop_margin)
+                distance = signal_stop_bound(perception, settings.front_offset_m,
+                                             settings.traffic_stop_margin)
                 if distance is None:
-                    result.add("PROTECT", "traffic", traffic.signal_id,
+                    result.add("PROTECT", "traffic", signal_id,
                                "TRAFFIC_DISTANCE:stop_line_unknown",
                                valid_until=perception.valid_until)
                 else:
-                    result.add("STOP", "traffic", traffic.signal_id,
+                    result.add("STOP", "traffic", signal_id,
                                "STOP_TRAFFIC:id={0},distance={1:.2f}".format(
-                                   traffic.signal_id, distance), distance=distance,
+                                   signal_id, distance), distance=distance,
                                valid_until=perception.valid_until)
         saw_target_conflict = False
         hazard_ids, confirmed_clear_ids = set(), set()
@@ -297,9 +298,11 @@ class DecisionEngine(object):
             self._protect(output, ego.speed, "EGO_MOTION:reverse_unsupported")
             return
         ego_speed = max(0.0, signed_speed)
-        if (traffic_required(perception) and not traffic_usable(perception)
-                and not can_approach_signal(perception)):
-            self._protect(output,ego.speed,'TRAFFIC_SOURCE:'+perception.traffic.reason)
+        signal_stop = signal_stop_requirement(perception)
+        if signal_stop is not None and signal_stop['distance'] < 0:
+            reason = ('TRAFFIC_DISTANCE:stop_line_unknown' if signal_stop.get('state_known') is True
+                      else 'TRAFFIC_SOURCE:'+signal_stop['reason'])
+            self._protect(output, ego.speed, reason)
             return
         targets_fresh = protocol.targets_usable(perception)
         required = requires_targets(perception.scene_id)
