@@ -1,0 +1,38 @@
+{
+  "data_kind": "synthetic_authored_example_not_runtime_capture",
+  "recording_kind": "synthetic_scripted_example",
+  "source_is_real_sensor": false,
+  "session_id": "demo_replay_session",
+  "interface_baseline_commit": "cbb80e4335bc603cf54e694c0ee957138ba5ca65",
+  "code_commit": null,
+  "sdk_timestamp_unit_verified": null,
+  "example_timestamp_unit": "synthetic_milliseconds_not_sdk_evidence",
+  "capture_clock": "process_monotonic_seconds",
+  "capture_clock_evidence": "fictional_clock_for_offline_fixture_only",
+  "planner_settings": {
+    "spacing": 1.0,
+    "horizon": 60.0,
+    "acceleration": 1.0,
+    "deceleration": 2.0,
+    "lateral_acceleration": 1.5,
+    "max_lateral_error": 0.5,
+    "max_heading_error": 0.7853981633974483,
+    "max_corner_angle": 0.35,
+    "hold_time": 0.1,
+    "front_offset_m": 3.9187,
+    "half_width_m": 0.9,
+    "obstacle_margin_m": 4.0,
+    "lateral_margin_m": 0.0,
+    "motion_tolerance_mps": 0.0,
+    "lateral_guard_time_s": 3.0,
+    "curve_recovery_time_s": 0.2
+  },
+  "planner_settings_evidence": "explicit_trial_values_not_vehicle_measurements",
+  "source_quality_config": {
+    "sensor_timeout_ms": 500,
+    "max_sensor_frame_gap": 10
+  },
+  "vehicle_instance_verified": false,
+  "actual_score": null,
+  "runtime_control_executed": false
+}

@@ -1,0 +1,11 @@
+[
+  {
+    "event_id": "demo_follow_and_expired_diagnostic_input",
+    "start_relative_time_s": 0.0,
+    "end_relative_time_s": 0.2,
+    "expected_behavior": "two component recomputations, expired diagnostic input blocked",
+    "actual_result": null,
+    "score": null,
+    "data_kind": "synthetic_authored_example"
+  }
+]
