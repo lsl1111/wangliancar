@@ -16,6 +16,7 @@ from core.route_segments import verified_spans
 from core.route_motion import lateral_residual
 from core.obstacle_geometry import footprint_entry, swept_footprint_intersects
 from core.validation import number
+from core.target_semantics import mapped_traffic_light
 
 
 EPS = 1e-9
@@ -112,6 +113,8 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
     points = [point for _, point in reference]
     nearest = None
     for target in perception.targets:
+        if mapped_traffic_light(target, perception):
+            continue
         values = (target.x, target.y, target.vx, target.vy,
                   target.length, target.width)
         if (target.valid is not True or not all(number(value) for value in values)

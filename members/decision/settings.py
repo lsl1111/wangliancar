@@ -8,7 +8,7 @@ ENV_PREFIX = "NEVC_DECISION_"
 FIELDS = (
     "cruise_speed", "min_gap", "time_headway", "gap_gain", "resume_margin",
     "hold_distance",
-    "follow_deceleration", "reaction_time", "front_offset_m",
+    "follow_deceleration", "approach_deceleration_ratio", "reaction_time", "front_offset_m",
     "emergency_clearance", "emergency_ttc", "static_speed_threshold",
     "standstill_speed", "blind_speed_tolerance", "traffic_stop_margin",
     "obstacle_stop_margin", "projection_tolerance_m", "route_ambiguity_m",
@@ -65,7 +65,7 @@ class DecisionSettings(object):
                  traffic_stop_margin=0.3, obstacle_stop_margin=0.5,
                  projection_tolerance_m=2.5, route_ambiguity_m=2.0,
                  conflict_horizon_s=3.0, recovery_frames=3,
-                 release_frames=2):
+                 release_frames=2, approach_deceleration_ratio=0.5):
         for name in FIELDS:
             setattr(self, name, locals()[name])
 
@@ -91,6 +91,8 @@ class DecisionSettings(object):
             raise ValueError("standstill_speed must be below blind_speed_tolerance")
         if self.hold_distance >= self.resume_margin:
             raise ValueError("hold_distance must be below resume_margin")
+        if not 0.0 < self.approach_deceleration_ratio <= 1.0:
+            raise ValueError("approach_deceleration_ratio must be in (0, 1]")
         return self
 
     def replace(self, **overrides):

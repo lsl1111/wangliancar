@@ -11,6 +11,7 @@ from core.interfaces import ControlOut, DecisionMode
 from core.scene_requirements import requires_targets
 from core.traffic_quality import traffic_required, traffic_usable, bounded_signal_stop
 from core.validation import current, number
+from core.target_semantics import mapped_traffic_light
 
 
 class SafetyAssessment(object):
@@ -73,6 +74,8 @@ class SafetySupervisor(object):
                 or target_status.get("usable") is not True):
             return False
         for target in getattr(perception, "targets", []):
+            if mapped_traffic_light(target, perception):
+                continue
             relevant = (getattr(target, "same_lane", False)
                         if getattr(target, "same_lane_valid", False)
                         else getattr(target, "lateral_band_match", False))
