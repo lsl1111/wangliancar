@@ -10,6 +10,7 @@ import threading
 import time
 
 from core.interfaces import ControlOut
+from simone_platform.evaluation import LocalEvaluation
 from simone_platform.sdk_compat import polling_structs
 from simone_platform.sensor_catalog import (TARGET_INGESTION_VERSION, sensor_kind,
                                            target_sensor_ids)
@@ -104,6 +105,7 @@ class SimOneAdapter(object):
         self._target_probe_after = {}
         self._target_log_signature = None
         self._target_log_time = 0.0
+        self._evaluation = None
 
     def bootstrap(self):
         sdk_dir = os.path.abspath(self.config.sdk_dir)
@@ -123,6 +125,10 @@ class SimOneAdapter(object):
         version = self.service_api.SoAPIGetVersion()
         self.sdk_version = _decode_sdk_text(version)
         self.structs, repairs = polling_structs(self.structs, version)
+        if getattr(self.config, "evaluation_enabled", True):
+            self._evaluation = LocalEvaluation(
+                self.service_api.SimoneAPI, version, self.logger,
+                getattr(self.config, "evaluation_flush_interval_sec", 1.0))
         if repairs:
             self.logger.warning("已修正 SDK %s 轮询结构布局: %s",
                                 _decode_sdk_text(version), ", ".join(repairs))
@@ -140,6 +146,8 @@ class SimOneAdapter(object):
             if result:
                 self.connected = True
                 self._target_accepting = True
+                if self._evaluation is not None:
+                    self._evaluation.initialize(self.config.vehicle_id)
                 self.pnc_api.SoSetDriverName(self.config.vehicle_id, "Captain")
                 self._register_target_callback()
                 self.logger.info(
@@ -166,6 +174,18 @@ class SimOneAdapter(object):
 
     def get_case_status(self):
         return int(self.service_api.SoGetCaseRunStatus())
+
+    def flush_evaluation(self, force=False):
+        if self._evaluation is None:
+            return True
+        return self._evaluation.flush(force)
+
+    def evaluation_status(self):
+        if self._evaluation is not None:
+            return self._evaluation.status()
+        return {"enabled": getattr(self.config, "evaluation_enabled", True),
+                "initialized": False, "mode": "local", "save_count": 0,
+                "last_save_ok": None}
 
     def get_case_info(self):
         result = {"case_name": "", "case_id": "", "task_id": ""}
@@ -881,15 +901,24 @@ class SimOneAdapter(object):
         with self._target_lock:
             self._target_accepting = False
         if self.connected and self.service_api is not None:
+            saved = True
             try:
-                self.service_api.SoTerminateSimOneAPI()
+                # SDK recording must still be alive when it writes its JSON.
+                saved = self.flush_evaluation(force=True)
             finally:
-                self.connected = False
-                with self._target_lock:
-                    self._target_streams.clear()
-                self._target_probe_after.clear()
-                self._last_frame_times.clear()
-                self._reference_update = 0.0
+                try:
+                    self.service_api.SoTerminateSimOneAPI()
+                finally:
+                    self.connected = False
+                    if self._evaluation is not None:
+                        self._evaluation.active = False
+                    with self._target_lock:
+                        self._target_streams.clear()
+                    self._target_probe_after.clear()
+                    self._last_frame_times.clear()
+                    self._reference_update = 0.0
+            if not saved:
+                raise RuntimeError("评价记录最终保存失败，请检查本次 captain.log")
 
     @staticmethod
     def gps_speed(gps):

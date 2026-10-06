@@ -60,6 +60,7 @@ class CaptainRuntime(object):
         self.stop_requested = False
         self.pid_path = os.path.join(config.runtime_dir, "captain.pid")
         self.lock_path = os.path.join(config.runtime_dir, "captain.lock")
+        self.stop_path = os.path.join(config.runtime_dir, "captain.stop")
         self._lock_stream = None
         self.snapshot_path = os.path.join(config.runtime_dir, "latest_perception.json")
         self.pipeline_path = os.path.join(config.runtime_dir, "latest_pipeline.json")
@@ -118,8 +119,10 @@ class CaptainRuntime(object):
                 self._wait_until_running()
                 self._loop(builder, once)
             finally:
-                self.adapter.shutdown()
-                self._remove_pid()
+                try:
+                    self.adapter.shutdown()
+                finally:
+                    self._remove_pid()
         finally:
             self._release_instance_lock()
 
@@ -129,6 +132,8 @@ class CaptainRuntime(object):
         last_route_signature = None
         processed = 0
         while not self.stop_requested:
+            if self._consume_stop_request():
+                break
             start = time.time()
             if processed == 0:
                 self.logger.info("首帧检查: 查询案例状态")
@@ -137,6 +142,7 @@ class CaptainRuntime(object):
                 self.logger.info("案例已停止，队长进程退出")
                 break
             if status != self.adapter.CASE_RUNNING:
+                self._flush_evaluation()
                 time.sleep(0.2)
                 continue
             if processed == 0:
@@ -209,6 +215,8 @@ class CaptainRuntime(object):
                     self._warned_no_control = True
                 else:
                     receipt["reason"] = "pipeline_invalid"
+            # Flush after sending control, so file I/O cannot expire its frame.
+            self._flush_evaluation()
             if self.config.publish_json:
                 self._publish(perception)
                 self._publish_pipeline(perception, decision, trajectory, control, receipt,
@@ -310,6 +318,8 @@ class CaptainRuntime(object):
         last_status = None
         self.logger.info("等待案例运行: 开始查询 SDK 状态")
         while not self.stop_requested:
+            if self._consume_stop_request():
+                return
             status = self.adapter.get_case_status()
             if status == self.adapter.CASE_RUNNING:
                 self.logger.info("案例状态已运行，进入感知/控制循环")
@@ -319,12 +329,33 @@ class CaptainRuntime(object):
                 last_status = status
             time.sleep(0.5)
 
+    def _flush_evaluation(self):
+        flush = getattr(self.adapter, "flush_evaluation", None)
+        if flush is not None:
+            flush()
+
+    def _evaluation_status(self):
+        status = getattr(self.adapter, "evaluation_status", None)
+        return status() if status is not None else {}
+
+    def _consume_stop_request(self):
+        try:
+            with open(self.stop_path, encoding="ascii") as stream:
+                requested_pid = stream.read().strip()
+        except (OSError, UnicodeError):
+            return False
+        if requested_pid == str(os.getpid()):
+            self.stop_requested = True
+            self.logger.info("收到结束脚本停止请求，保存评价并退出")
+        return self.stop_requested
+
     def _publish(self, perception):
         return self._publish_json(self.snapshot_path, perception_to_dict(perception))
 
     def _publish_pipeline(self, perception, decision, trajectory, control, receipt, safety):
         return self._publish_json(self.pipeline_path, {
             "runtime": dict(self.runtime_info),
+            "evaluation": self._evaluation_status(),
             "perception_frame_id": perception.frame_id,
             "target_input": target_input_summary(perception),
             "route_reference": {

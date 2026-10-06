@@ -1,5 +1,7 @@
 # 在 NEVCsim 中运行当前整车链路
 
+本地评价记录默认开启，初始化、定期保存和退出前保存的核对方法见 [评价记录说明](../EVALUATION.md)。PR12 本机测试使用 `F:\wangliancar\nevc_auto_p0_fixes\scripts\StartCaptain.bat` 和同目录的 `KillCaptain.bat`；必须核对实际运行目录。
+
 平台控制器仍使用这两个文件：
 
 | 控制器字段 | 当前电脑的绝对路径 |

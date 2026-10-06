@@ -1,6 +1,7 @@
 """INI configuration with project-relative defaults."""
 
 import configparser
+import math
 import os
 
 
@@ -20,6 +21,12 @@ class AppConfig(object):
         self.connect_timeout_sec = max(1.0, float(values.get("connect_timeout_sec", "30")))
         self.scene_id_override = int(values.get("scene_id_override", "0"))
         self.send_control = _as_bool(values.get("send_control", "false"))
+        self.evaluation_enabled = _as_bool(values.get("evaluation_enabled", "true"))
+        self.evaluation_flush_interval_sec = float(
+            values.get("evaluation_flush_interval_sec", "1.0"))
+        if (not math.isfinite(self.evaluation_flush_interval_sec) or
+                self.evaluation_flush_interval_sec < 0.1):
+            raise ValueError("evaluation_flush_interval_sec must be finite and >= 0.1")
         self.control_calibrated = _as_bool(values.get("control_calibrated", "false"))
         for name in ("wheelbase_m", "front_steer_max_rad", "throttle_per_mps",
                      "brake_per_mps", "hold_brake", "emergency_brake",
