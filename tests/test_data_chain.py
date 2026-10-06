@@ -152,7 +152,9 @@ class DataChainTests(unittest.TestCase):
         decision = decide(value)
         self.assertEqual(DecisionMode.KEEP_LANE, decision.mode)
         self.assertGreater(decision.stop_distance, 0.0)
-        trajectory = plan(value, decision)
+        with patch.dict(os.environ, {'NEVC_VEHICLE_FRONT_OFFSET_M': '3.5',
+                                     'NEVC_VEHICLE_HALF_WIDTH_M': '.9'}):
+            trajectory = plan(value, decision)
         self.assertTrue(trajectory.valid, trajectory.reason)
         self.assertFalse(trajectory.emergency_stop)
         self.assertTrue(trajectory.stop_required)

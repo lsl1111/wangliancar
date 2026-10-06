@@ -10,11 +10,12 @@ import threading
 import time
 
 from core.interfaces import ControlOut
+from core.map_scope import matches_lane
 from simone_platform.evaluation import LocalEvaluation
 from simone_platform.sdk_compat import polling_structs
 from simone_platform.sensor_catalog import (TARGET_INGESTION_VERSION, sensor_kind,
                                            target_sensor_ids)
-from simone_platform.map_observations import MapObservationReader
+from simone_platform.map_observations import MapObservationReader, vector_items
 
 
 def _decode_sdk_text(value):
@@ -763,7 +764,8 @@ class SimOneAdapter(object):
         Uses the dynamic per-frame signal truth via SoGetTrafficLights, keyed by
         the static light ids discovered from the HD map (getTrafficLightList).
         Returns a list of dicts, one per currently relevant traffic light:
-          {opendrive_id, status, count_down, x, y}
+          {opendrive_id, status, count_down, x, y, stop_line_x, stop_line_y,
+           stop_line_boundary (when exposed), association_lane_id}
         A failed dynamic read retains its map candidate with read_ok=False.
         last_traffic_query distinguishes confirmed association from an absent
         map API; [] alone is not proof that a road has no applicable signal.
@@ -783,6 +785,22 @@ class SimOneAdapter(object):
             count = int(traffic_light_list.Size()) if traffic_light_list else 0
             for index in range(count):
                 light = traffic_light_list.GetElement(index)
+                scopes = None
+                scope_confirmed = False
+                if hasattr(light, 'validities'):
+                    # This binding's stop-line lookup can return a road's line
+                    # even for a light whose explicit validity excludes the lane.
+                    try:
+                        scopes = [dict(road_id=int(scope.roadId), section_index=int(scope.sectionIndex),
+                                       from_lane_id=int(scope.fromLaneId), to_lane_id=int(scope.toLaneId))
+                                  for scope in vector_items(light.validities)]
+                        if not matches_lane(scopes, lane_id):
+                            continue
+                        scope_confirmed = True
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        # Keep an actually returned line as an unresolved
+                        # applicability fact; do not fail the whole catalog.
+                        pass
                 stoplines = self.hdmap.getStoplineList(light, self.hdmap.pySimString(lane_id))
                 if stoplines is None:
                     return lights  # unknown association, not confirmed absence
@@ -792,13 +810,31 @@ class SimOneAdapter(object):
                 for stop_index in range(stoplines.Size()):
                     stopline = stoplines.GetElement(stop_index)
                     knots = getattr(stopline, "boundaryKnots", None)
+                    boundary = None
                     if knots and knots.Size():
-                        sx = sum(float(knots.GetElement(j).x) for j in range(knots.Size())) / knots.Size()
-                        sy = sum(float(knots.GetElement(j).y) for j in range(knots.Size())) / knots.Size()
+                        boundary = [[float(knots.GetElement(j).x),
+                                     float(knots.GetElement(j).y),
+                                     float(getattr(knots.GetElement(j), 'z', 0.0))]
+                                    for j in range(knots.Size())]
+                        sx = sum(point[0] for point in boundary) / len(boundary)
+                        sy = sum(point[1] for point in boundary) / len(boundary)
                     else:
                         sx = float(stopline.pt.x)
                         sy = float(stopline.pt.y)
-                    stop_points.append((sx, sy))
+                    point = {'stop_line_x': sx, 'stop_line_y': sy}
+                    point['signal_scope_valid'] = scope_confirmed
+                    if scopes is not None:
+                        point['signal_validities'] = copy.deepcopy(scopes)
+                    front = getattr(light, 'heading', None)
+                    if front is not None and hasattr(front, 'x') and hasattr(front, 'y'):
+                        hx, hy = float(front.x), float(front.y)
+                        if not all(math.isfinite(v) for v in (hx, hy)):
+                            raise ValueError('invalid signal heading')
+                        if math.hypot(hx, hy) > 1e-9:
+                            point['signal_heading'] = math.atan2(hy, hx)
+                    if boundary is not None:
+                        point['stop_line_boundary'] = boundary
+                    stop_points.append(point)
                 if stop_points:
                     pt = getattr(light, "pt", None)
                     candidates.append((int(light.id), getattr(pt, "x", None),
@@ -818,17 +854,20 @@ class SimOneAdapter(object):
                 read_ok, status, count_down = False, 0, -1
             if not read_ok:
                 self.last_traffic_query["read_ok"] = False
-            for sx, sy in stop_points:
-                lights.append({
+            for stop_point in stop_points:
+                # Accept older in-memory cache fixtures as point-only records.
+                point = (copy.deepcopy(stop_point) if isinstance(stop_point, dict) else
+                         dict(stop_line_x=stop_point[0], stop_line_y=stop_point[1]))
+                point.update({
                     "opendrive_id": opendrive_id,
                     "status": status,
                     "count_down": count_down,
                     "read_ok": read_ok,
-                    "stop_line_x": sx,
-                    "stop_line_y": sy,
+                    "association_lane_id": lane_id,
                     "x": float(x) if isinstance(x, (int, float)) else None,
                     "y": float(y) if isinstance(y, (int, float)) else None,
                 })
+                lights.append(point)
         return lights
 
     def get_driver_control(self):

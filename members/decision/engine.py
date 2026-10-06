@@ -8,7 +8,7 @@ import math
 
 from core.interfaces import DecisionMode, DecisionTarget
 from core.geometry import opposes_direction
-from core.traffic_quality import traffic_required, traffic_usable, can_approach_signal
+from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.scene_requirements import requires_targets, FOLLOW_SCENES, AEB_SCENES
 
 from members.decision import candidates, protocol, speed_policy
@@ -44,6 +44,7 @@ class DecisionEngine(object):
         self._emergency_static_targets = set()
         self._had_target_conflict = False
         self._target_clear_count = 0
+        self._target_hazard_ids = set()
         self._context = None
         self._last_frame = None
 
@@ -112,27 +113,28 @@ class DecisionEngine(object):
     def _collect(self, perception, route, ego_speed, cruising, distinct):
         result = ConstraintSet(cruising)
         settings = self.settings
-        traffic = perception.traffic
-        if (protocol.traffic_requires_stop(traffic)
-                or (traffic_required(perception) and not traffic_usable(perception))):
+        signal_stop = signal_stop_requirement(perception)
+        if signal_stop is not None:
+            signal_ids = signal_stop['signal_ids']
+            signal_id = signal_ids[0] if len(signal_ids) == 1 else -1
             if settings.front_offset_m is None:
-                result.add("PROTECT", "traffic", traffic.signal_id,
+                result.add("PROTECT", "traffic", signal_id,
                            "TRAFFIC_DISTANCE:vehicle_front_unknown",
                            valid_until=perception.valid_until)
             else:
-                distance = protocol.traffic_stop_distance(
-                    traffic, settings.front_offset_m + settings.traffic_stop_margin)
+                distance = signal_stop_bound(perception, settings.front_offset_m,
+                                             settings.traffic_stop_margin)
                 if distance is None:
-                    result.add("PROTECT", "traffic", traffic.signal_id,
+                    result.add("PROTECT", "traffic", signal_id,
                                "TRAFFIC_DISTANCE:stop_line_unknown",
                                valid_until=perception.valid_until)
                 else:
-                    result.add("STOP", "traffic", traffic.signal_id,
+                    result.add("STOP", "traffic", signal_id,
                                "STOP_TRAFFIC:id={0},distance={1:.2f}".format(
-                                   traffic.signal_id, distance), distance=distance,
+                                   signal_id, distance), distance=distance,
                                valid_until=perception.valid_until)
         saw_target_conflict = False
-        saw_safe_follow = False
+        hazard_ids, confirmed_clear_ids = set(), set()
         result.obstacle_clearance_m = settings.obstacle_stop_margin
         seen_ids = set()
         for target in perception.targets if protocol.targets_usable(perception) else []:
@@ -143,8 +145,18 @@ class DecisionEngine(object):
             identifier = getattr(target, "id", -1)
             if type(identifier) is int and identifier >= 0:
                 seen_ids.add(identifier)
+            if item.coverage_stop_distance is not None:
+                saw_target_conflict = True
+                hazard_ids.add(identifier)
+                result.add("STOP", "target", identifier,
+                    "STOP_ROUTE_COVERAGE:id={0},distance={1:.2f}".format(
+                        identifier, item.coverage_stop_distance),
+                    distance=item.coverage_stop_distance,
+                    valid_until=perception.valid_until)
+                continue
             if item.gap is not None and speed_policy.is_emergency(item, ego_speed, settings):
                 saw_target_conflict = True
+                hazard_ids.add(identifier)
                 if item.static and type(identifier) is int and identifier >= 0:
                     self._emergency_static_targets.add(identifier)
                 result.add("EMERGENCY", "target", identifier,
@@ -154,6 +166,7 @@ class DecisionEngine(object):
                 continue
             if item.reason or item.gap is None:
                 saw_target_conflict = True
+                hazard_ids.add(identifier)
                 result.add("PROTECT", "target", identifier,
                            "TARGET_UNKNOWN:id={0},{1}".format(
                                identifier, item.reason or "gap_unknown"),
@@ -161,9 +174,16 @@ class DecisionEngine(object):
                 continue
             if (item.relation not in (candidates.CURRENT_LANE,
                                       candidates.FORWARD_ROUTE)
-                    or item.lead_speed < -settings.static_speed_threshold
-                    or abs(item.lateral_speed) > settings.static_speed_threshold):
+                    or not item.motion_supported):
+                if (not item.motion_relevant and item.stop_distance is not None
+                        and item.relation in (candidates.CURRENT_LANE, candidates.FORWARD_ROUTE)):
+                    result.add("STOP", "target", identifier,
+                               "TARGET_MOTION_AHEAD:id={0},distance={1:.2f}".format(
+                                   identifier, item.stop_distance), distance=item.stop_distance,
+                               valid_until=perception.valid_until)
+                    continue
                 saw_target_conflict = True
+                hazard_ids.add(identifier)
                 result.add("PROTECT", "target", identifier,
                            "TARGET_CONFLICT:id={0},relation={1}".format(
                                identifier, item.relation),
@@ -194,8 +214,10 @@ class DecisionEngine(object):
                     else:
                         self._static_targets.pop(identifier, None)
                         self._moving_confirm.pop(identifier, None)
+                        confirmed_clear_ids.add(identifier)
             if static:
                 saw_target_conflict = True
+                hazard_ids.add(identifier)
                 stop_distance = (max(0.0, item.gap - settings.min_gap)
                                  if follow_context else item.stop_distance)
                 if (identifier in self._emergency_static_targets
@@ -217,7 +239,6 @@ class DecisionEngine(object):
                                distance=stop_distance,
                                valid_until=perception.valid_until)
             else:
-                saw_safe_follow = True
                 self._emergency_static_targets.discard(identifier)
                 demand = speed_policy.follow_speed(item, ego_speed, cruising, settings)
                 result.add("FOLLOW", "target", identifier,
@@ -233,13 +254,14 @@ class DecisionEngine(object):
         if saw_target_conflict:
             self._had_target_conflict = True
             self._target_clear_count = 0
-        elif saw_safe_follow:
-            # A distant, moving lead is a speed constraint, not a latched
-            # emergency. Its later valid disappearance must not brake us.
-            self._had_target_conflict = False
-            self._target_clear_count = 0
+            self._target_hazard_ids.update(hazard_ids)
         elif self._had_target_conflict:
-            if distinct:
+            # Confirmed movement of the actual old static hazard already has
+            # its own fresh-frame gate. A different safe lead is not evidence
+            # that a disappeared hazard is clear.
+            if self._target_hazard_ids and self._target_hazard_ids <= confirmed_clear_ids:
+                self._target_clear_count = settings.release_frames
+            elif distinct:
                 self._target_clear_count += 1
             if self._target_clear_count < settings.release_frames:
                 result.add("PROTECT", "target", -1,
@@ -250,6 +272,7 @@ class DecisionEngine(object):
                 self._target_clear_count = 0
                 self._static_targets.clear()
                 self._moving_confirm.clear()
+                self._target_hazard_ids.clear()
         return result
 
     def _arbitrate(self, perception, output, distinct):
@@ -274,9 +297,11 @@ class DecisionEngine(object):
             self._protect(output, ego.speed, "EGO_MOTION:reverse_unsupported")
             return
         ego_speed = max(0.0, signed_speed)
-        if (traffic_required(perception) and not traffic_usable(perception)
-                and not can_approach_signal(perception)):
-            self._protect(output,ego.speed,'TRAFFIC_SOURCE:'+perception.traffic.reason)
+        signal_stop = signal_stop_requirement(perception)
+        if signal_stop is not None and signal_stop['distance'] < 0:
+            reason = ('TRAFFIC_DISTANCE:stop_line_unknown' if signal_stop.get('state_known') is True
+                      else 'TRAFFIC_SOURCE:'+signal_stop['reason'])
+            self._protect(output, ego.speed, reason)
             return
         targets_fresh = protocol.targets_usable(perception)
         required = requires_targets(perception.scene_id)

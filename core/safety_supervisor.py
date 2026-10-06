@@ -5,13 +5,16 @@ candidate brake command is not proof that the simulator executed it.
 """
 
 import math
+import os
 import time
+from types import SimpleNamespace
 
 from core.interfaces import ControlOut, DecisionMode
 from core.scene_requirements import requires_targets
-from core.traffic_quality import traffic_required, traffic_usable, bounded_signal_stop
+from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.validation import current, number
 from core.target_semantics import mapped_traffic_light
+from core.route_obstacles import RouteContext, mapped_route_motion, route_footprint_relevant
 
 
 class SafetyAssessment(object):
@@ -32,7 +35,7 @@ class SafetySupervisor(object):
     SimOne may reject repeated headers; the sender must report its receipt.
     """
 
-    def __init__(self, config, clock=None):
+    def __init__(self, config, clock=None, planning_settings=None, decision_settings=None):
         self.clock = clock or time.monotonic
         self.repeat_fault_ms = max(1, int(getattr(config, "pipeline_timeout_ms", 200)))
         self.last_gps_ms = max(1, int(getattr(config, "sensor_timeout_ms", 500)))
@@ -40,6 +43,10 @@ class SafetySupervisor(object):
         self.controlled_brake = self._brake(getattr(config, "safety_controlled_brake", 0.3))
         self.emergency_brake = self._brake(getattr(config, "safety_emergency_brake", 1.0))
         self.normal_control_required = bool(getattr(config, "send_control", False))
+        self.signal_stop_margin = getattr(planning_settings, 'traffic_stop_margin',
+                                         getattr(decision_settings, 'traffic_stop_margin', .3))
+        if not number(self.signal_stop_margin) or self.signal_stop_margin < 0:
+            raise ValueError('invalid safety traffic stop margin')
         self.last_case = None
         self.last_frame = None
         self.last_frame_at = None
@@ -47,6 +54,35 @@ class SafetySupervisor(object):
         self.last_good_at = None
         self.recovering = False
         self.good_frames = 0
+        # Runtime passes validated snapshots. Legacy callers can supply the
+        # same measured dimensions through config or common environment names.
+        values = {}
+        for field, config_field, env, default in (
+                ('front_offset_m', 'vehicle_front_offset_m', 'NEVC_VEHICLE_FRONT_OFFSET_M', None),
+                ('half_width_m', 'vehicle_half_width_m', 'NEVC_VEHICLE_HALF_WIDTH_M', None),
+                ('horizon', 'planning_horizon_m', 'NEVC_PLANNING_HORIZON_M', 60.0),
+                ('deceleration', 'planning_deceleration_mps2', 'NEVC_PLANNING_DECELERATION_MPS2', 2.0),
+                ('lateral_guard_time_s', 'planning_lateral_guard_time_s', 'NEVC_PLANNING_LATERAL_GUARD_TIME_S', 3.0),
+                ('lateral_margin_m', 'planning_lateral_margin_m', 'NEVC_PLANNING_LATERAL_MARGIN_M', 0.0)):
+            value = getattr(planning_settings, field, None)
+            if value is None:
+                value = getattr(config, config_field, None)
+            if value is None:
+                value = float(os.environ[env]) if env in os.environ else default
+            if value is not None and (not number(value) or value < 0
+                    or (field != 'lateral_margin_m' and value <= 0)):
+                raise ValueError('invalid safety obstacle setting: '+field)
+            values[field] = value
+        self.collision_settings = SimpleNamespace(**values)
+        self.route_settings = SimpleNamespace(**dict(
+            (field, getattr(decision_settings, field, default)) for field, default in (
+                ('projection_tolerance_m', 2.5), ('route_ambiguity_m', 2.0),
+                ('emergency_ttc', 2.0), ('emergency_clearance', 2.0),
+                ('standstill_speed', .1), ('static_speed_threshold', .3))))
+        for field, value in vars(self.route_settings).items():
+            if (not number(value) or value < 0
+                    or (field not in ('standstill_speed', 'emergency_clearance') and value <= 0)):
+                raise ValueError('invalid safety route setting: '+field)
 
     @staticmethod
     def _brake(value):
@@ -54,6 +90,34 @@ class SafetySupervisor(object):
         if not math.isfinite(value) or not 0.0 < value <= 1.0:
             raise ValueError("safety brake must be finite and in (0, 1]")
         return value
+
+    def _signal_guard(self, perception, decision, trajectory):
+        requirement = signal_stop_requirement(perception)
+        if requirement is None:
+            return ''
+        front = self.collision_settings.front_offset_m
+        # Legacy callers without body data can still verify the old rear-axle
+        # bound; runtime always supplies the shared measured front offset.
+        bound = signal_stop_bound(perception, front, self.signal_stop_margin if front is not None else 0.)
+        if (bound is None or not current(decision, perception)
+                or not current(trajectory, decision) or trajectory.stop_required is not True
+                or not number(trajectory.stop_distance)
+                or not 0 <= trajectory.stop_distance <= bound+1e-6):
+            return ('required_traffic_unavailable' if bound is None or requirement.get('state_known') is not True
+                    else 'traffic_stop_constraint_missing')
+        if (requirement.get('state_known') is not True
+                and (not number(decision.stop_distance) or decision.stop_distance < 0
+                     or decision.stop_distance > bound+1e-6
+                     or trajectory.stop_distance > decision.stop_distance+1e-6)):
+            return 'required_traffic_unavailable'
+        route = RouteContext(perception, self.route_settings)
+        if route.ego_s is None or not trajectory.points:
+            return 'traffic_trajectory_boundary_unverified'
+        for point in trajectory.points:
+            projection = route.project(point.x, point.y, self.route_settings)
+            if projection is None or projection['s']-route.ego_s > bound+1e-6:
+                return 'traffic_trajectory_crosses_boundary'
+        return ''
 
     def reset(self, require_recovery=False):
         self.last_frame = None
@@ -64,7 +128,7 @@ class SafetySupervisor(object):
         self.good_frames = 0
 
     @staticmethod
-    def _imminent_collision(perception):
+    def _imminent_collision(perception, planning_settings=None, decision_settings=None):
         """Use only a fresh target stream for an independent brake override."""
         statuses = getattr(perception, "source_status", {})
         target_status = statuses.get("targets", {}) if isinstance(statuses, dict) else {}
@@ -73,6 +137,15 @@ class SafetySupervisor(object):
                 or not isinstance(target_status, dict)
                 or target_status.get("usable") is not True):
             return False
+        route = None
+        if (planning_settings is not None and decision_settings is not None
+                and number(planning_settings.front_offset_m)
+                and number(planning_settings.half_width_m)
+                and getattr(getattr(perception, 'lane', None), 'valid', False)):
+            try:
+                route = RouteContext(perception, decision_settings)
+            except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
+                route = None
         for target in getattr(perception, "targets", []):
             if mapped_traffic_light(target, perception):
                 continue
@@ -81,10 +154,37 @@ class SafetySupervisor(object):
                         else getattr(target, "lateral_band_match", False))
             distance = getattr(target, "longitudinal_distance", None)
             ttc = getattr(target, "ttc", None)
+            if getattr(target, 'valid', False) and route is not None:
+                try:
+                    motion = mapped_route_motion(perception, target, route,
+                        decision_settings, planning_settings.front_offset_m)
+                except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
+                    motion = None
+                if motion is not None:
+                    distance, ttc = motion['distance'], motion['ttc']
+                    # A currently observed footprint ahead with signed road
+                    # closing speed is still an independent collision check.
+                    # This also retains real oncoming traffic on a bend.
+                    if (distance > 0 and motion['gap'] <= decision_settings.emergency_clearance
+                            and (perception.ego.speed > decision_settings.standstill_speed
+                                 or motion['lead_speed'] < -decision_settings.static_speed_threshold)):
+                        return True
+                    relevant = True
+                else:
+                    try:
+                        intersects = route_footprint_relevant(perception, target, route,
+                                                             planning_settings)
+                    except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
+                        intersects = None
+                    if intersects is False:
+                        continue
+                    if intersects is True:
+                        relevant = True
             if (getattr(target, "valid", False) and relevant
                     and type(distance) in (int, float) and math.isfinite(distance)
                     and distance > 0 and type(ttc) in (int, float)
-                    and math.isfinite(ttc) and 0 <= ttc <= 2.0):
+                    and math.isfinite(ttc) and 0 <= ttc <= (
+                        decision_settings.emergency_ttc if decision_settings is not None else 2.0)):
                 return True
         return False
 
@@ -121,13 +221,14 @@ class SafetySupervisor(object):
             self.last_good_header = (perception.frame_id, perception.timestamp)
             self.last_good_at = now
 
+        signal_fault = self._signal_guard(perception, decision, trajectory) if gps_ok else ''
         mode, reason = "normal", ""
         if not gps_ok:
             mode, reason = "fault_stop", "gps_invalid_or_expired"
         elif (getattr(perception.ego, "age_ms", -1) >= self.repeat_fault_ms
               or repeat_ms >= self.repeat_fault_ms):
             mode, reason = "fault_stop", "gps_frame_stalled"
-        elif self._imminent_collision(perception):
+        elif self._imminent_collision(perception, self.collision_settings, self.route_settings):
             mode, reason = "emergency_stop", "imminent_target_collision"
         elif not getattr(perception, "lane", None) or not perception.lane.valid:
             mode, reason = "controlled_stop", "lane_unavailable"
@@ -138,14 +239,8 @@ class SafetySupervisor(object):
                    or not getattr(perception, "target_source", "").startswith("sensor:")
                    or not self._target_records_valid(perception))):
             mode, reason = "controlled_stop", "required_targets_unavailable"
-        elif (traffic_required(perception) and not traffic_usable(perception)
-              and not (current(decision, perception)
-                       and bounded_signal_stop(perception, decision)
-                       and current(trajectory, decision)
-                       and trajectory.stop_required is True
-                       and number(trajectory.stop_distance)
-                       and 0 <= trajectory.stop_distance <= decision.stop_distance)):
-            mode, reason = 'controlled_stop', 'required_traffic_unavailable'
+        elif signal_fault:
+            mode, reason = 'controlled_stop', signal_fault
         elif (current(decision, perception)
               and decision.mode == DecisionMode.EMERGENCY_BRAKE):
             mode, reason = "emergency_stop", "collision_or_emergency_request"

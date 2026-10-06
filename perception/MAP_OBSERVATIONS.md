@@ -2,6 +2,8 @@
 
 2026-10-02。此接入按 API 能力和当前车道工作，没有按题号选择地图坐标或构造对象。固定入口、Python 3.6 和单进程调用链保持不变。
 
+2026-10-04：动态信号消费核对灯的完整车道作用范围、所选转向和朝向，发布独立路线停车边界。地图观测目录仍保留原生道路关联信息，不能把目录里的 `association_signal_ids` 直接当作本车适用信号。新 `traffic.signal_groups` 与决策/规划/监护合同见 [信号约束](SIGNAL_CONSTRAINTS.md)。
+
 ## 实际数据链
 
 `HDMapAPI → SimOneAdapter/MapObservationReader → PerceptionBuilder → Perception → decide / plan / compute_control`

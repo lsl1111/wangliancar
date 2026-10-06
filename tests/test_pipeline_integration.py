@@ -160,7 +160,9 @@ class SimulatedSDK(object):
         def line(y):
             return Vector([SimpleNamespace(x=float(x), y=y, z=0.0)
                            for x in range(161)])
-        signal = SimpleNamespace(id=42, pt=SimpleNamespace(x=25.0, y=0.0))
+        signal = SimpleNamespace(id=42, pt=SimpleNamespace(x=25.0, y=0.0),
+            validities=Vector([SimpleNamespace(roadId=1, sectionIndex=0,
+                                               fromLaneId=-1, toLaneId=-1)]))
         stopline = SimpleNamespace(pt=SimpleNamespace(x=25.0, y=0.0))
         adapter.hdmap = SimpleNamespace(
             pySimPoint3D=lambda *args: args, pySimString=lambda value: value,
@@ -302,7 +304,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 self.assertEqual(sdk.frames, len(sdk.lights))
                 for pipeline, native in zip(sdk.pipelines, sdk.sent):
                     self.assertEqual("DecisionEngine", pipeline["runtime"]["engine"])
-                    self.assertEqual("decision-constraints-v4", pipeline["runtime"]["version"])
+                    self.assertEqual("decision-constraints-v10", pipeline["runtime"]["version"])
                     self.assertEqual(3.0, pipeline["runtime"]["cruise_speed"])
                     frame = pipeline["perception_frame_id"]
                     for key in ("decision", "trajectory", "control"):
@@ -424,7 +426,7 @@ class PipelineIntegrationTests(unittest.TestCase):
                 # at the current-lane/curve boundary or during the bend.
                 self.assertEqual("safety_sent", pipeline["send"]["reason"])
                 self.assertLess(math.hypot(position[0] - terminal[0], position[1] - terminal[1]), 2.0)
-        self.assertEqual("successor-continuation-v3", pipeline["runtime"]["route_reference_version"])
+        self.assertEqual("successor-continuation-v4", pipeline["runtime"]["route_reference_version"])
         crossing = [(position, pipeline) for position, pipeline in zip(sdk.positions, sdk.pipelines)
                     if 18.5 <= position[0] <= 23.0 and position[1] < 1.0]
         self.assertTrue(crossing)
@@ -462,7 +464,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         sdk = self.run_pipeline(scene=6, frames=4, initial_offset=0.6)
         trajectory = sdk.pipelines[-1]["trajectory"]
         self.assertFalse(trajectory["valid"])
-        self.assertIn("vehicle too far from reference", trajectory["reason"])
+        self.assertIn("lateral recovery requires explicit vehicle/steering capability", trajectory["reason"])
         self.assertEqual(trajectory["reason"], trajectory["errors"][0])
         self.assertEqual(sdk.pipelines[-1]["perception_frame_id"], trajectory["frame_id"])
         self.assertTrue(all(c["throttle"] == 0 and c["brake"] > 0 for c in sdk.sent))

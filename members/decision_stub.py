@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-constraints-v4"
+DECISION_VERSION = "decision-constraints-v10"
 _ENGINE = DecisionEngine()
 
 
@@ -14,9 +14,14 @@ def reset_decision(settings=None):
 
 def decision_info():
     """Expose the running implementation and tuning for launcher diagnostics."""
-    return {"version": DECISION_VERSION, "engine": type(_ENGINE).__name__,
-            "cruise_speed": float(_ENGINE.settings.cruise_speed),
-            "front_offset_m": _ENGINE.settings.front_offset_m}
+    info = {"version": DECISION_VERSION, "engine": type(_ENGINE).__name__}
+    info.update(vars(_ENGINE.settings))
+    return info
+
+
+def decision_settings():
+    """Expose validated session settings to the captain's independent monitor."""
+    return _ENGINE.settings
 
 
 def decide(perception):

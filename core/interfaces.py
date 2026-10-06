@@ -159,6 +159,12 @@ class TrafficControl(object):
         self.signal_id = -1
         self.count_down = -1
         self.candidates = []
+        # Independent, route-scoped signal groups. Distances are rear-axle
+        # route metres; scope/coverage boundaries are explicitly distinguished
+        # from mapped stop lines. False retains legacy single-signal semantics.
+        self.signal_groups = []
+        self.signal_groups_valid = False
+        self.diagnostics = []
         self.ambiguous = False
         self.reason = "unavailable"
         self.observed = False

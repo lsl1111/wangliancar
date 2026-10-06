@@ -3,6 +3,11 @@
 import math
 
 
+# Shared default support boundary for forward trajectory tracking. This is
+# independent of tolerances used to verify two HDMap samples at their join.
+DEFAULT_FORWARD_HEADING_ERROR_RAD = math.pi / 4
+
+
 def clamp(value, low, high):
     return max(low, min(high, value))
 
@@ -48,6 +53,26 @@ def project_polyline(points, x, y):
                     "point": (px, py), "heading": math.atan2(dy, dx)}
         along += length
     return best
+
+
+def projection_within_polyline(projection, point_count, epsilon=1e-6):
+    """Distinguish a bounded internal vertex from true coverage extrapolation.
+
+    A clamped projection onto an internal vertex may have a raw ratio outside
+    its single segment. Only the first/last segment can establish that the
+    whole polyline's start/end was exceeded. Width, height, direction and
+    ambiguity checks remain the caller's responsibility.
+    """
+    if (not isinstance(projection, dict) or type(point_count) is not int
+            or point_count < 2 or type(epsilon) not in (int, float)
+            or not math.isfinite(epsilon) or epsilon < 0):
+        return False
+    index, raw = projection.get('index'), projection.get('raw_ratio')
+    if (type(index) is not int or not 0 <= index < point_count - 1
+            or type(raw) not in (int, float) or not math.isfinite(raw)):
+        return False
+    return not ((index == 0 and raw < -epsilon)
+                or (index == point_count - 2 and raw > 1 + epsilon))
 
 
 def polyline_prefix(points, distance):

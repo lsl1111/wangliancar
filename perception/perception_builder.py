@@ -5,23 +5,11 @@ import copy
 import time
 
 from core.geometry import calculate_ttc, speed_2d, world_to_ego, project_polyline
-from core.interfaces import EgoState, Perception, Target, TrafficControl
+from core.interfaces import EgoState, Perception, Target
 from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
 from perception.map_semantics import speed_limit_observations
-
-
-# ESimOne_TrafficLight_Status values returned by SoGetTrafficLights.
-_TRAFFIC_LIGHT_STATUS = {
-    0: "INVALID",
-    1: "RED",
-    2: "GREEN",
-    3: "YELLOW",
-    4: "RED_BLINK",
-    5: "GREEN_BLINK",
-    6: "YELLOW_BLINK",
-    7: "BLACK",
-}
+from perception.traffic_signals import build_traffic
 
 
 def _finite_data(value):
@@ -291,90 +279,7 @@ class PerceptionBuilder(object):
                 result.lane.speed_limit, result.lane.speed_limit_source = limit, source
 
     def _build_traffic(self, ego, lane, errors):
-        traffic = TrafficControl()
-        traffic.speed_limit = lane.speed_limit
-        if not ego.valid or not lane.valid:
-            return traffic
-        try:
-            lights = self.adapter.read_traffic(lane.lane_id) or []
-        except Exception as exc:
-            errors.append("TRAFFIC_UNAVAILABLE:" + type(exc).__name__)
-            return traffic
-        query = getattr(self.adapter, "last_traffic_query", {})
-        traffic.association_valid = (isinstance(query, dict)
-                                     and query.get("association_valid") is True)
-        origin = project_polyline(lane.center_line, ego.x, ego.y)
-        if origin is None:
-            return traffic
-        for light in lights:
-            try:
-                status = int(light.get("status", 0))
-                sx, sy = float(light["stop_line_x"]), float(light["stop_line_y"])
-                if not all(math.isfinite(v) for v in (sx, sy)):
-                    raise ValueError("invalid stopline")
-                stop = project_polyline(lane.center_line, sx, sy)
-                if (stop is None or stop["distance"] > max(2.0, lane.lane_width)
-                        or stop["raw_ratio"] < 0 or stop["raw_ratio"] > 1):
-                    continue
-                distance = stop["s"] - origin["s"]
-                if distance < 0:
-                    continue
-                item = copy.deepcopy(light)
-                item["opendrive_id"] = int(light.get("opendrive_id", -1))
-                item["count_down"] = int(light.get("count_down", -1))
-                item["stop_distance"] = distance
-                item["signal_state"] = _TRAFFIC_LIGHT_STATUS.get(status, "UNKNOWN")
-                item["read_ok"] = (light.get("read_ok", True) is True
-                                   and status in _TRAFFIC_LIGHT_STATUS and status != 0)
-                item["signal_distance"] = -1.0
-                if light.get("x") is not None and light.get("y") is not None:
-                    x, y = float(light["x"]), float(light["y"])
-                    if not all(math.isfinite(v) for v in (x, y)):
-                        raise ValueError("invalid light position")
-                    item["signal_distance"] = math.hypot(x - ego.x, y - ego.y)
-                if not _finite_data(item):
-                    raise ValueError("invalid signal metadata")
-                traffic.candidates.append(item)
-            except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-                errors.append("TRAFFIC_RECORD_INVALID")
-                traffic.required = True
-                traffic.reason = "signal_record_invalid"
-        traffic.candidates.sort(key=lambda item: item["stop_distance"])
-        if not traffic.candidates:
-            if traffic.association_valid and not traffic.required:
-                traffic.signal_presence = "absent"
-                traffic.reason = "no_applicable_signal_ahead"
-            return traffic
-        traffic.association_valid = True
-        traffic.signal_presence = "present"
-        traffic.required = True
-        traffic.observed = True
-        nearest = traffic.candidates[0]
-        traffic.stop_line_distance = nearest["stop_distance"]
-        group = [item for item in traffic.candidates
-                 if abs(item["stop_distance"] - nearest["stop_distance"]) < 1.0]
-        if traffic.reason == "signal_record_invalid":
-            # A malformed associated record may have a nearer stop line.
-            traffic.stop_line_distance = -1.0
-            return traffic
-        if any(item["read_ok"] is not True for item in group):
-            traffic.reason = "signal_read_unavailable"
-            errors.append("TRAFFIC_STATE_UNAVAILABLE")
-            return traffic
-        # Direction association is not exposed reliably by this binding. Retain
-        # candidates, mark ambiguity, and never choose a green by list order.
-        if (len(set(item["opendrive_id"] for item in group)) > 1
-                or len(set(item["signal_state"] for item in group)) > 1):
-            traffic.ambiguous, traffic.reason = True, "signal_direction_unresolved"
-            errors.append("TRAFFIC_AMBIGUOUS")
-            return traffic
-        traffic.signal_state = nearest["signal_state"]
-        traffic.signal_id = nearest["opendrive_id"]
-        traffic.count_down = nearest["count_down"]
-        traffic.signal_distance = nearest["signal_distance"]
-        traffic.valid = True
-        traffic.reason = "unique_lane_stopline_signal"
-        return traffic
+        return build_traffic(self.adapter, ego, lane, errors)
 
     @staticmethod
     def _path_position(points, x, y):

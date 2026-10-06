@@ -89,8 +89,15 @@ class PreparedPath(object):
         segment = self.arc[index + 1] - self.arc[index]
         ratio = (s - self.arc[index]) / segment
         first, second = self.points[index], self.points[index + 1]
-        return tuple(first[k] + ratio * (second[k] - first[k])
-                     for k in range(3))
+        # The planner encodes constant acceleration on spatial segments:
+        # v(s)^2 = v0^2 + 2*a*ds. Linear speed interpolation changes that
+        # profile whenever equivalent intermediate points are inserted.
+        # hypot avoids overflowing the square of an otherwise finite speed.
+        speed = math.hypot(first[2]*math.sqrt(1.0-ratio),
+                           second[2]*math.sqrt(ratio))
+        speed = max(min(first[2], second[2]), min(max(first[2], second[2]), speed))
+        return (first[0]+ratio*(second[0]-first[0]),
+                first[1]+ratio*(second[1]-first[1]), speed)
 
     def heading_at(self, s):
         """Interpolate requested body yaw across +/-pi without a full turn."""
@@ -106,9 +113,11 @@ class PreparedPath(object):
         right_s = min(self.length, s + window_m)
         if right_s - left_s <= 1e-6:
             return 0.0
-        middle_s = s
-        if middle_s - left_s <= 1e-6 or right_s - middle_s <= 1e-6:
-            middle_s = (left_s + right_s) / 2.0
+        # Clipping at a rolling path's start/end must keep the three arc
+        # samples equally spaced. A middle sample a few centimetres from
+        # one endpoint overweights that map segment's tangent and invents
+        # a curvature spike when the same road is replanned one frame later.
+        middle_s = (left_s + right_s) / 2.0
         ax, ay = self.sample(left_s)[:2]
         bx, by = self.sample(middle_s)[:2]
         cx, cy = self.sample(right_s)[:2]
@@ -136,6 +145,7 @@ class PreparedPath(object):
     def speed_reference(self, s, trajectory, settings):
         """Point speed with future slowdowns and known path end as upper bounds."""
         local = self.sample(s)[2]
+        rising_preview_end = s
         # A rolling profile starts at measured speed, not at cruise speed.
         # Preview the rising first segment throughout acceleration, otherwise
         # PI sees zero error on every replan and never reaches cruise speed.
@@ -148,11 +158,28 @@ class PreparedPath(object):
                 # endpoint. Sample its interior so a stationary car can creep
                 # to the actual boundary, respecting every subsequent cap.
                 preview_s = self.length * 0.5
+            previous_s, previous = s, local
+            for point_s, point in zip(self.arc, self.points):
+                if point_s <= s:
+                    continue
+                if point_s > preview_s:
+                    break
+                if point[2] <= 1e-6 or point[2] < previous:
+                    preview_s = previous_s
+                    break
+                previous_s, previous = point_s, point[2]
             preview_speed = self.sample(preview_s)[2]
+            if preview_speed < previous:
+                # A short accelerate-then-stop profile can peak before its
+                # geometric midpoint (for example at a retained map vertex).
+                # Preview only its rising prefix; keep the falling portion
+                # and the zero endpoint as independent braking constraints.
+                preview_s, preview_speed = previous_s, previous
             launch_limit = math.sqrt(local * local +
                                      2.0 * settings.launch_accel_mps2 *
                                      max(0.0, preview_s - s))
             local = max(local, min(preview_speed, launch_limit))
+            rising_preview_end = preview_s
         precision = getattr(trajectory, "precision_stop", False)
         margin = settings.precision_end_margin_m if precision else settings.path_end_margin_m
         max_speed = (settings.max_reverse_speed_mps
@@ -175,6 +202,11 @@ class PreparedPath(object):
             limit = min(limit, trajectory.target_speed)
         for index, future_s in enumerate(self.arc):
             if future_s <= s:
+                continue
+            # A rising waypoint inside the accepted launch preview is not a
+            # slowdown. Previewing it as a brake boundary cancels propulsion
+            # whenever a replan retains a map vertex just centimetres ahead.
+            if future_s < rising_preview_end:
                 continue
             future_speed = self.points[index][2]
             distance = future_s - s

@@ -1,6 +1,7 @@
 """Captain-owned process lifecycle and four-member integration pipeline."""
 
 import json
+import math
 import os
 import signal
 import time
@@ -11,8 +12,8 @@ from core.interfaces import DecisionTarget, Trajectory, ControlOut
 from core.safety_supervisor import SafetySupervisor
 from core.scene_requirements import requires_targets
 from members.control_stub import compute_control, configure_control
-from members.decision_stub import decide, decision_info, reset_decision
-from members.planning_stub import plan
+from members.decision_stub import decide, decision_info, decision_settings, reset_decision
+from members.planning_stub import plan, configure_planning
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, ROUTE_REFERENCE_VERSION
 from simone_platform.simone_adapter import SimOneAdapter
@@ -25,6 +26,28 @@ def _member_output(value, expected, source):
     if isinstance(value, expected) and value.valid is False:
         return value.bind(source)
     return validate_output(value, expected, source)
+
+
+def _validate_motion_contract(planning, decision):
+    """One set of body dimensions and motion-check bounds across members."""
+    pairs = (("front_offset_m", "front_offset_m"),
+             ("half_width_m", "half_width_m"),
+             ("horizon", "motion_horizon_m"),
+             ("deceleration", "motion_deceleration"),
+             ("deceleration", "follow_deceleration"),
+             ("motion_tolerance_mps", "motion_tolerance_mps"),
+             ("projection_tolerance_m", "projection_tolerance_m"),
+             ("route_ambiguity_m", "route_ambiguity_m"),
+             ("lateral_guard_time_s", "motion_guard_time_s"),
+             ("lateral_margin_m", "motion_lateral_margin_m"),
+             ("traffic_stop_margin", "traffic_stop_margin"))
+    for planning_name, decision_name in pairs:
+        left, right = getattr(planning, planning_name), getattr(decision, decision_name)
+        if left is None and right is None:
+            continue
+        if (left is None or right is None or
+                not math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9)):
+            raise ValueError("decision/planning motion settings differ: " + planning_name)
 
 
 def target_input_summary(perception):
@@ -71,13 +94,17 @@ class CaptainRuntime(object):
         self._braking_event_count = 0
         self._braking_history = []
         self._braking_io_warned = False
-        self.safety = SafetySupervisor(config)
+        planning_settings = configure_planning(config)
         reset_decision()
+        _validate_motion_contract(planning_settings, decision_settings())
+        self.safety = SafetySupervisor(config, planning_settings=planning_settings,
+                                       decision_settings=decision_settings())
         self.runtime_info = decision_info()
         self.runtime_info.update({"pid": os.getpid(),
                                   "project_dir": os.path.dirname(os.path.abspath(__file__)),
                                   "target_ingestion_version": TARGET_INGESTION_VERSION,
                                   "route_reference_version": ROUTE_REFERENCE_VERSION,
+                                  "planning_settings": dict(vars(planning_settings)),
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
 

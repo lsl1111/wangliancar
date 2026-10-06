@@ -17,6 +17,7 @@ from unittest.mock import patch
 from core.interfaces import DecisionTarget, Perception, Target
 from core.scene_requirements import requires_targets
 from core.validation import number
+from members import planning_stub
 from members.planning.lane_planner import PlannerSettings
 from members.planning_stub import plan
 
@@ -393,7 +394,11 @@ def replay_records(manifest, records, events=None, max_records=10000):
         p.valid_until = clock + (p.valid_until - capture)
         d.valid_until = clock + (d.valid_until - capture)
         with patch("core.validation.time.monotonic", return_value=clock), \
-                patch.object(PlannerSettings, "from_environment", return_value=settings):
+                patch.object(PlannerSettings, "from_environment", return_value=settings), \
+                patch.object(planning_stub, "_CONTROL_GEOMETRY", {}, create=True):
+            # The captain's process-local calibrated geometry is not recorded
+            # input. Freeze the complete manifest even when this process has
+            # previously configured another runtime; unknown stays unknown.
             trajectory = plan(p, d)
         summary["replayed"] += 1
         summary["replay_valid"] += int(trajectory.valid is True)

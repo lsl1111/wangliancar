@@ -1,4 +1,5 @@
 """Brake preview must survive accumulated propulsion demand on replans."""
+import math
 import unittest
 
 from core.interfaces import Trajectory, TrajectoryPoint
@@ -42,18 +43,38 @@ class LongitudinalAnticipationTests(unittest.TestCase):
     def test_falling_stop_profile_brakes_with_positive_target_speed_and_old_integral(self):
         # Public trajectory encoding permits positive target speed while
         # approaching a finite stop; braking must not require a zero target.
-        p, _ = inputs(speed=6, x=0, y=0)
-        t = Trajectory().bind(p)
-        t.valid, t.target_speed = True, 6.0
-        t.stop_required, t.stop_distance = True, 10.0
-        t.points = [TrajectoryPoint(0, 0, 6, 0, 0),
-                    TrajectoryPoint(1, 0, 5.8, 0, .17),
-                    TrajectoryPoint(5, 0, 4, 0, 1),
-                    TrajectoryPoint(10, 0, 0, 0, 3.5)]
-        engine = ControlEngine(calibration())
+        speed = 6.5796392398436545
+        acceleration = -1.516876342621341
+        p, _ = inputs(speed=speed, x=0, y=0)
+        p.ego.vx = speed
+        now = [0.0]
+        engine = ControlEngine(calibration(), clock=lambda: now[0])
+        # Initialize the same case before seeding old propulsion state. A seed
+        # before the first compute is cleared by case reset and misses the bug.
+        warm = Trajectory().bind(p)
+        warm.valid, warm.target_speed = True, speed
+        warm.points = [TrajectoryPoint(i, 0, speed, 0, i / speed)
+                       for i in range(101)]
+        self.assertTrue(engine.compute(p, warm).valid)
         engine.integral = 3.4383475565878467
+        now[0] = .11
+        p.frame_id += 1
+        p.ego.frame_id = p.frame_id
+        p.timestamp += 110
+        t = Trajectory().bind(p)
+        t.valid, t.target_speed = True, speed
+        t.stop_required = True
+        t.stop_distance = speed * speed / (-2 * acceleration)
+        positions = [float(i) for i in range(int(t.stop_distance) + 1)]
+        positions.append(t.stop_distance)
+        for distance in positions:
+            point_speed = math.sqrt(max(0.0, speed * speed + 2 * acceleration * distance))
+            elapsed = (speed - point_speed) / (-acceleration)
+            t.points.append(TrajectoryPoint(distance, 0, point_speed, 0, elapsed))
         c = engine.compute(p, t)
         self.assertTrue(c.valid, c.errors)
-        self.assertLess(c.diagnostics['reference_acceleration_mps2'], 0)
+        self.assertAlmostEqual(acceleration, c.diagnostics['reference_acceleration_mps2'])
+        self.assertAlmostEqual(speed, c.diagnostics['reference_speed_mps'])
+        self.assertEqual(0, engine.integral)
         self.assertEqual(0, c.throttle)
         self.assertGreater(c.brake, 0)

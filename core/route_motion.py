@@ -7,14 +7,41 @@ Callers must establish map membership, route association and measured width.
 """
 import math
 
-from core.geometry import normalize_angle
+from core.geometry import normalize_angle, projection_within_polyline
 from core.validation import number
+
+
+def lateral_drift_bound(target, projection, velocity, width, window, margin, tolerance):
+    """Shared support test and full drift for constant lateral target motion.
+
+    A tolerance permits noise but never removes its footprint expansion.
+    Beyond it, require bounded map membership, heading and remaining corridor.
+    This tests the same local hypothesis for behavior and trajectory planning.
+    """
+    if not all(number(v) for v in (velocity, window, margin, tolerance)) or window <= 0 or min(margin, tolerance) < 0:
+        raise ValueError('invalid target motion bound')
+    if abs(velocity) <= 1e-9:
+        return 0.0
+    drift = abs(velocity)*window
+    if not number(drift):
+        raise ValueError('nonfinite obstacle lateral drift')
+    if abs(velocity) <= tolerance:
+        return drift
+    if (not number(width) or width <= 0 or not number(target.heading)
+            or not projection.get('_coverage_checked', False)):
+        raise ValueError('crossing or oncoming obstacle motion unsupported')
+    angle = target.heading-projection['heading']
+    extent = .5*(target.length*abs(math.sin(angle))+target.width*abs(math.cos(angle)))
+    clearance = width*.5-extent-margin
+    if clearance <= 0 or projection['distance']+drift > clearance:
+        raise ValueError('crossing or oncoming obstacle motion unsupported')
+    return drift
 
 
 def lateral_residual(points, projection, target, width):
     values = (target.heading, target.vx, target.vy, target.length, target.width, width)
     if (not all(number(v) for v in values) or min(target.length, target.width, width) <= 0
-            or not 0 <= projection['raw_ratio'] <= 1):
+            or not projection_within_polyline(projection, len(points))):
         return None
     heading = projection['heading']
     angle = normalize_angle(target.heading - heading)

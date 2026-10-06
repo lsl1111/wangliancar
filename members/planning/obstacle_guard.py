@@ -11,51 +11,37 @@ with targets can be marked valid.
 
 import math
 
-from core.geometry import project_polyline, polyline_prefix
-from core.route_segments import verified_spans
-from core.route_motion import lateral_residual
+from core.geometry import project_polyline, polyline_prefix, projection_within_polyline
+from core.route_motion import lateral_residual, lateral_drift_bound
 from core.obstacle_geometry import footprint_entry, swept_footprint_intersects
 from core.validation import number
 from core.target_semantics import mapped_traffic_light
+from core.route_obstacles import (motion_guard_distance, motion_guard_time,
+                                 front_reach_reference, path_reference, RouteContext)
 
 
 EPS = 1e-9
 
 
-def _route_association(perception, target):
+def _route_association(perception, target, settings, route=None):
     """A mapped successor uses its own segment tangent and measured width."""
     lane = perception.lane
-    if target.same_lane_valid is not True or lane.forward_reference_valid is not True:
+    if target.same_lane_valid is not True:
         return None
-    current, forward = lane.center_line, lane.forward_reference
-    if (not isinstance(current, (list, tuple)) or not isinstance(forward, (list, tuple))
-            or len(current) < 2 or len(forward) < len(current)
-            or [tuple(p[:2]) for p in forward[:len(current)]] != [tuple(p[:2]) for p in current]
-            or not lane.forward_lane_ids or lane.forward_lane_ids[0] != lane.lane_id):
-        return None
-    points = [tuple(p[:2]) for p in forward]
-    if (not all(len(p) == 2 and all(number(v) for v in p) for p in points)
-            or any(math.hypot(b[0]-a[0], b[1]-a[1]) <= 1e-6
-                   for a, b in zip(points, points[1:]))):
-        return None
-    spans = verified_spans(len(current), len(forward), lane.forward_lane_ids,
-                           getattr(lane, 'forward_lane_spans', []))
-    if target.lane_id not in spans:
+    route = route if route is not None else RouteContext(perception, settings)
+    if (route.ego_s is None or (target.lane_id != lane.lane_id
+            and (target.lane_id not in route.forward_ids or target.lane_id not in route.spans))):
         return None
     width = (lane.lane_width if target.lane_id == lane.lane_id and lane.lane_width_valid
              else getattr(target, 'lane_width_m', None))
     if not number(width) or width <= 0.1:
         return None
-    start, end = spans[target.lane_id]
-    local = project_polyline(points[start:end+1], target.x, target.y)
-    anchor = project_polyline(points[:len(current)], perception.ego.x, perception.ego.y)
-    if (local is None or anchor is None or not 0 <= local['raw_ratio'] <= 1
-            or local['distance'] > width * 0.5):
+    local = route.project(target.x, target.y, settings, target.lane_id)
+    if local is None or local['distance'] > width*.5:
         return None
-    offset = sum(math.hypot(b[0]-a[0], b[1]-a[1])
-                 for a, b in zip(points[:start+1], points[1:start+1]))
-    local['s'] += offset - anchor['s']
-    local['index'] += start
+    local['s'] -= route.ego_s
+    local['_coverage_checked']=True
+    local['_source_points']=route.points
     return local, width
 
 
@@ -67,33 +53,19 @@ def _lateral_drift(perception, target, projection, velocity, settings, route_wid
     The full drift expands the obstacle envelope even when motion falls under
     an explicitly configured tolerance.
     """
-    if abs(velocity) <= EPS:
-        return 0.0
-    window = max(settings.lateral_guard_time_s,
-                 perception.ego.speed / settings.deceleration)
-    drift = abs(velocity) * window
-    if not number(drift):
-        raise ValueError("nonfinite obstacle lateral drift")
-    if abs(velocity) <= settings.motion_tolerance_mps:
-        return drift
+    window = motion_guard_time(perception.ego.speed,settings.lateral_guard_time_s,
+                               settings.deceleration)
     lane = perception.lane
     width = route_width
     if width is None and (target.same_lane_valid is True and target.lane_id == lane.lane_id
                           and lane.lane_width_valid is True):
         width = lane.lane_width
-    if (not number(width) or width <= 0 or not number(target.heading)
-            or not 0.0 <= projection["raw_ratio"] <= 1.0):
-        raise ValueError("crossing or oncoming obstacle motion unsupported")
-    angle = target.heading - projection["heading"]
-    lateral_extent = 0.5 * (target.length * abs(math.sin(angle))
-                            + target.width * abs(math.cos(angle)))
-    clearance = width * 0.5 - lateral_extent - settings.lateral_margin_m
-    if clearance <= 0 or projection["distance"] + drift > clearance:
-        raise ValueError("crossing or oncoming obstacle motion unsupported")
-    return drift
+    return lateral_drift_bound(target, projection, velocity, width, window,
+                               settings.lateral_margin_m, settings.motion_tolerance_mps)
 
 
-def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_m=None):
+def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_m=None,
+                  motion_stop_distance=None):
     """Return nearest conservative stop distance, or None for a clear path.
 
     `reference` starts at the GPS rear-axle projection. The oriented target
@@ -111,6 +83,8 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
             or not isinstance(status, dict) or status.get("usable") is not True):
         raise ValueError("obstacle-aware planning requires a usable Sensor API target frame")
     points = [point for _, point in reference]
+    collision_reference=path_reference(front_reach_reference(points,settings.front_offset_m))
+    route = RouteContext(perception, settings)
     nearest = None
     for target in perception.targets:
         if mapped_traffic_light(target, perception):
@@ -127,7 +101,8 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
         projection = project_polyline(points, target.x, target.y)
         if projection is None:
             raise ValueError("obstacle projection unavailable")
-        association = _route_association(perception, target)
+        projection['_coverage_checked']=projection_within_polyline(projection,len(points))
+        association = _route_association(perception, target, settings, route)
         route_width = None
         if association is not None:
             projection, route_width = association
@@ -137,14 +112,18 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
         lateral_velocity = (-math.sin(heading) * target.vx
                             + math.cos(heading) * target.vy)
         if association is not None:
-            residual = lateral_residual(perception.lane.forward_reference,
+            residual = lateral_residual(projection['_source_points'],
                                         projection, target, route_width)
             if residual is not None:
                 lateral_velocity = residual
-        guard_time = max(settings.lateral_guard_time_s,
-                         perception.ego.speed / settings.deceleration)
-        ahead = polyline_prefix(points, max(settings.horizon,
-            perception.ego.speed**2 / (2*settings.deceleration) + settings.front_offset_m))
+        guard_time = motion_guard_time(perception.ego.speed,settings.lateral_guard_time_s,
+                                       settings.deceleration)
+        motion_distance = motion_guard_distance(perception.ego.speed,
+            settings.horizon,settings.deceleration,settings.front_offset_m)
+        if number(motion_stop_distance) and motion_stop_distance > EPS:
+            motion_distance = min(motion_distance, motion_stop_distance)
+        ahead = polyline_prefix(points, motion_distance)
+        ahead=front_reach_reference(ahead,settings.front_offset_m)
         ahead_reference = [(0.0, ahead[0])]
         for a, b in zip(ahead, ahead[1:]):
             ahead_reference.append((ahead_reference[-1][0] +
@@ -157,7 +136,7 @@ def obstacle_stop(perception, reference, settings, clearance_m=None, clearances_
                 raise ValueError("crossing or oncoming obstacle motion unsupported")
             padding += _lateral_drift(perception, target, projection,
                                        lateral_velocity, settings, route_width)
-        entry = footprint_entry(reference, target, padding)
+        entry = footprint_entry(collision_reference, target, padding)
         if entry is None:
             continue
         gap = settings.obstacle_margin_m if clearance_m is None else clearance_m

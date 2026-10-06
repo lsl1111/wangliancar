@@ -8,11 +8,13 @@ ENV_PREFIX = "NEVC_DECISION_"
 FIELDS = (
     "cruise_speed", "min_gap", "time_headway", "gap_gain", "resume_margin",
     "hold_distance",
-    "follow_deceleration", "approach_deceleration_ratio", "reaction_time", "front_offset_m",
+    "follow_deceleration", "approach_deceleration_ratio", "reaction_time", "front_offset_m", "half_width_m",
     "emergency_clearance", "emergency_ttc", "static_speed_threshold",
     "standstill_speed", "blind_speed_tolerance", "traffic_stop_margin",
     "obstacle_stop_margin", "projection_tolerance_m", "route_ambiguity_m",
     "conflict_horizon_s", "recovery_frames", "release_frames",
+    "motion_horizon_m", "motion_deceleration", "motion_guard_time_s", "motion_lateral_margin_m",
+    "motion_tolerance_mps",
 )
 INT_FIELDS = ("recovery_frames", "release_frames")
 DEPRECATED = ("launch_ttc_cap", "stop_margin")
@@ -47,6 +49,15 @@ def overrides_from_environment(environ=None):
     if "NEVC_VEHICLE_FRONT_OFFSET_M" in environ:
         values["front_offset_m"] = _parse("NEVC_VEHICLE_FRONT_OFFSET_M",
                                           environ["NEVC_VEHICLE_FRONT_OFFSET_M"])
+    for key, field in (("NEVC_VEHICLE_HALF_WIDTH_M", "half_width_m"),
+                       ("NEVC_PLANNING_HORIZON_M", "motion_horizon_m"),
+                       ("NEVC_PLANNING_DECELERATION_MPS2", "motion_deceleration"),
+                       ("NEVC_PLANNING_DECELERATION_MPS2", "follow_deceleration"),
+                       ("NEVC_PLANNING_MOTION_TOLERANCE_MPS", "motion_tolerance_mps"),
+                       ("NEVC_PLANNING_LATERAL_GUARD_TIME_S", "motion_guard_time_s"),
+                       ("NEVC_PLANNING_LATERAL_MARGIN_M", "motion_lateral_margin_m")):
+        if key in environ:
+            values[field] = _parse(key, environ[key])
     for name in FIELDS:
         key = ENV_PREFIX + name.upper()
         if key in environ:
@@ -65,7 +76,10 @@ class DecisionSettings(object):
                  traffic_stop_margin=0.3, obstacle_stop_margin=0.5,
                  projection_tolerance_m=2.5, route_ambiguity_m=2.0,
                  conflict_horizon_s=3.0, recovery_frames=3,
-                 release_frames=2, approach_deceleration_ratio=0.5):
+                 release_frames=2, approach_deceleration_ratio=0.5,
+                 half_width_m=None, motion_horizon_m=60.0, motion_deceleration=2.0,
+                 motion_guard_time_s=3.0, motion_lateral_margin_m=0.0,
+                 motion_tolerance_mps=0.0):
         for name in FIELDS:
             setattr(self, name, locals()[name])
 
@@ -76,17 +90,20 @@ class DecisionSettings(object):
                 if type(value) is not int or value < 1:
                     raise ValueError("decision setting {0} must be a positive integer".format(name))
                 continue
-            if name == "front_offset_m" and value is None:
+            if name in ("front_offset_m", "half_width_m") and value is None:
                 continue
             if not _finite(value) or value < 0.0:
                 raise ValueError("decision setting {0} must be finite and nonnegative".format(name))
         for name in ("cruise_speed", "time_headway", "gap_gain", "resume_margin", "follow_deceleration",
                      "emergency_ttc", "static_speed_threshold", "blind_speed_tolerance",
-                     "projection_tolerance_m", "route_ambiguity_m", "conflict_horizon_s"):
+                     "projection_tolerance_m", "route_ambiguity_m", "conflict_horizon_s",
+                     "motion_horizon_m", "motion_deceleration", "motion_guard_time_s"):
             if getattr(self, name) <= 0.0:
                 raise ValueError("decision setting {0} must be positive".format(name))
         if self.front_offset_m is not None and self.front_offset_m <= 0.0:
             raise ValueError("measured front offset must be positive")
+        if self.half_width_m is not None and self.half_width_m <= 0.0:
+            raise ValueError("measured half width must be positive")
         if self.standstill_speed >= self.blind_speed_tolerance:
             raise ValueError("standstill_speed must be below blind_speed_tolerance")
         if self.hold_distance >= self.resume_margin:

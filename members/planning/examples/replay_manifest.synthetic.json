@@ -25,7 +25,15 @@
     "lateral_margin_m": 0.0,
     "motion_tolerance_mps": 0.0,
     "lateral_guard_time_s": 3.0,
-    "curve_recovery_time_s": 0.2
+    "curve_recovery_time_s": 0.2,
+    "rear_offset_m": null,
+    "wheelbase_m": null,
+    "front_steer_max_rad": null,
+    "max_lateral_acceleration_mps2": null,
+    "approach_deceleration_ratio": 0.5,
+    "traffic_stop_margin": 0.3,
+    "projection_tolerance_m": 2.5,
+    "route_ambiguity_m": 2.0
   },
   "planner_settings_evidence": "explicit_trial_values_not_vehicle_measurements",
   "source_quality_config": {
