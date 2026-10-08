@@ -11,6 +11,7 @@ from core.validation import validate_output
 from core.interfaces import DecisionTarget, Trajectory, ControlOut
 from core.safety_supervisor import SafetySupervisor
 from core.scene_requirements import requires_targets
+from core.runtime_diagnostics import BrakeDiagnostics, source_revision
 from members.control_stub import compute_control, configure_control
 from members.decision_stub import decide, decision_info, decision_settings, reset_decision
 from members.planning_stub import plan, configure_planning
@@ -94,6 +95,9 @@ class CaptainRuntime(object):
         self._braking_event_count = 0
         self._braking_history = []
         self._braking_io_warned = False
+        self._brake_diagnostics = BrakeDiagnostics()
+        self._braking_state = {}
+        self._pipeline_timing = {}
         planning_settings = configure_planning(config)
         reset_decision()
         _validate_motion_contract(planning_settings, decision_settings())
@@ -104,6 +108,8 @@ class CaptainRuntime(object):
                                   "project_dir": os.path.dirname(os.path.abspath(__file__)),
                                   "target_ingestion_version": TARGET_INGESTION_VERSION,
                                   "route_reference_version": ROUTE_REFERENCE_VERSION,
+                                  "source": {"status": "not_captured", "git_commit": None,
+                                             "git_branch": None, "dirty": None},
                                   "planning_settings": dict(vars(planning_settings)),
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
@@ -117,6 +123,7 @@ class CaptainRuntime(object):
             self.logger.warning("已有队长进程运行，忽略重复启动 pid=%s", os.getpid())
             return
         try:
+            self.runtime_info["source"] = source_revision(self.runtime_info["project_dir"])
             self._write_pid()
             self.logger.info(
                 "队长启动 pid=%s send_control=%s safety_brake_enabled=%s 日志=%s",
@@ -131,8 +138,10 @@ class CaptainRuntime(object):
                 info["cruise_speed"] * 3.6,
             )
             self.logger.info("路线接续实现 version=%s", ROUTE_REFERENCE_VERSION)
+            self.logger.info("启动代码 source=%s", self.runtime_info["source"])
             try:
                 self.adapter.bootstrap()
+                self.runtime_info["sdk_version"] = getattr(self.adapter, "sdk_version", "")
                 self.adapter.initialize()
                 self.adapter.load_hdmap()
                 route_manager = RouteManager(self.adapter, self.logger)
@@ -189,16 +198,19 @@ class CaptainRuntime(object):
                                  perception.frame_id, perception.valid)
             repeated = last_frame == perception.frame_id
             last_frame = perception.frame_id
+            self._pipeline_timing = {"decision_started_monotonic": time.monotonic()}
             try:
                 decision = _member_output(decide(perception), DecisionTarget, perception)
             except Exception as exc:
                 decision = DecisionTarget().bind(perception)
                 decision.errors.append("DECISION_INVALID:" + type(exc).__name__ + ":" + str(exc))
+            self._pipeline_timing["planning_started_monotonic"] = time.monotonic()
             try:
                 trajectory = _member_output(plan(perception, decision), Trajectory, decision)
             except Exception as exc:
                 trajectory = Trajectory().bind(decision)
                 trajectory.errors.append("TRAJECTORY_INVALID:" + type(exc).__name__ + ":" + str(exc))
+            self._pipeline_timing["control_started_monotonic"] = time.monotonic()
             try:
                 control = compute_control(perception, trajectory)
                 if control.valid:
@@ -206,6 +218,7 @@ class CaptainRuntime(object):
             except Exception as exc:
                 control = ControlOut().bind(trajectory)
                 control.errors.append("CONTROL_INVALID:" + type(exc).__name__ + ":" + str(exc))
+            self._pipeline_timing["safety_started_monotonic"] = time.monotonic()
             safety = self.safety.evaluate(perception, decision, trajectory, control)
             receipt = {"attempted": False, "ok": False, "reason": "observe_mode",
                        "safety_mode": safety.mode, "safety_reason": safety.reason,
@@ -242,13 +255,14 @@ class CaptainRuntime(object):
                     self._warned_no_control = True
                 else:
                     receipt["reason"] = "pipeline_invalid"
+            self._pipeline_timing["send_finished_monotonic"] = time.monotonic()
             # Flush after sending control, so file I/O cannot expire its frame.
             self._flush_evaluation()
+            self._trace_braking(perception, decision, trajectory, control, receipt, safety)
             if self.config.publish_json:
                 self._publish(perception)
                 self._publish_pipeline(perception, decision, trajectory, control, receipt,
                                        safety)
-            self._trace_braking(perception, decision, trajectory, control, receipt, safety)
             processed += 1
             if processed == 1 or processed % 100 == 0:
                 target_status = perception.source_status.get("targets", {})
@@ -285,16 +299,25 @@ class CaptainRuntime(object):
         Save at most 80 full snapshots per process, with eight preceding brief
         frames and a two-second sample interval during an unchanged brake.
         """
-        commanded = safety.control if safety.active else control
-        active = (safety.active or not trajectory.valid or trajectory.emergency_stop
-                  or (commanded is not None and commanded.valid
-                      and (commanded.brake > 0 or commanded.handbrake)))
-        signature = (active, safety.mode, safety.reason, trajectory.valid,
-                     trajectory.emergency_stop, trajectory.reason,
-                     control.valid, control.source, tuple(control.errors), decision.mode)
         now = time.monotonic()
+        state = self._brake_diagnostics.observe(perception, trajectory, control, receipt, safety, now)
+        self._braking_state = state
+        active = state["requested"]
+        candidate = (state["candidate_available"], state["candidate_braking"])
+        if safety.active:
+            # The selected safety reason dominates an unused controller's
+            # alternating errors. Preserve all errors in the full snapshot.
+            signature = (active, "safety", safety.mode, safety.reason, candidate,
+                         receipt.get("reason"))
+        else:
+            signature = (active, "control", trajectory.valid, trajectory.emergency_stop,
+                         trajectory.reason, control.valid, control.source,
+                         tuple(control.errors), decision.mode, candidate, receipt.get("reason"))
         previous = self._braking_signature
-        changed = ((active or (previous is not None and previous[0]))
+        last_sent = state["last_successful_command"]
+        relevant = active or (previous is not None and previous[0]) or (
+            last_sent is not None and last_sent["braking"])
+        changed = (relevant
                    and signature != previous)
         sample = active and now >= self._braking_next_sample
         brief = {"frame_id": perception.frame_id, "speed_mps": perception.ego.speed,
@@ -305,20 +328,26 @@ class CaptainRuntime(object):
                  "control_brake": control.brake, "control_throttle": control.throttle,
                  "control_diagnostics": to_dict(control.diagnostics),
                  "safety_reason": safety.reason, "send": dict(receipt),
-                 "target_count": len(perception.targets)}
+                 "target_count": len(perception.targets), "braking": to_dict(state),
+                 "pipeline_timing": dict(self._pipeline_timing)}
         self._braking_signature = signature
-        if changed or sample:
-            event = ("brake_start" if active and (previous is None or not previous[0])
-                     else "brake_release" if not active else
+        if changed or sample or state["release_sent"]:
+            event = ("brake_release" if state["release_sent"] else
+                     "brake_command_unavailable" if not active and not state["candidate_available"] else
+                     "brake_release_requested" if not active else
+                     "brake_start" if previous is None or not previous[0] else
                      "brake_change" if changed else "brake_sample")
             self._braking_next_sample = now + 2.0
             self.logger.info("braking_event=%s frame=%s decision=%s trajectory=%s "
                              "stop_distance=%.2f control_brake=%.3f reference_speed=%s "
-                             "safety_reason=%s send=%s",
+                             "safety_reason=%s send=%s candidate_braking=%s last_sent_braking=%s "
+                             "observed_brake=%.3f observed_valid=%s",
                              event, perception.frame_id, decision.reason, trajectory.reason,
                              trajectory.stop_distance, control.brake,
                              control.diagnostics.get("reference_speed_mps"),
-                             safety.reason, receipt.get("reason"))
+                             safety.reason, receipt.get("reason"), state["candidate_braking"],
+                             last_sent["braking"] if last_sent is not None else None,
+                             state["observed_brake"], state["observed_valid"])
             if self.config.publish_json and self._braking_event_count < 80:
                 self._braking_event_count += 1
                 directory = os.path.join(self.config.runtime_dir, "braking_events")
@@ -329,6 +358,7 @@ class CaptainRuntime(object):
                     self._publish_json(path, {
                         "event": event, "runtime": dict(self.runtime_info),
                         "recorded_monotonic": now, "preceding_frames": list(self._braking_history),
+                        "pipeline_timing": dict(self._pipeline_timing), "braking": to_dict(state),
                         "summary": brief, "perception": perception_to_dict(perception),
                         "decision": to_dict(decision), "trajectory": to_dict(trajectory),
                         "control": to_dict(control), "send": dict(receipt),
@@ -382,6 +412,8 @@ class CaptainRuntime(object):
     def _publish_pipeline(self, perception, decision, trajectory, control, receipt, safety):
         return self._publish_json(self.pipeline_path, {
             "runtime": dict(self.runtime_info),
+            "pipeline_timing": dict(self._pipeline_timing),
+            "braking": to_dict(self._braking_state),
             "evaluation": self._evaluation_status(),
             "perception_frame_id": perception.frame_id,
             "target_input": target_input_summary(perception),

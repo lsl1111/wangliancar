@@ -11,7 +11,7 @@
 
 `StartCaptain.bat` 启动项目的 `main.py`，依次执行感知、决策、规划、控制并由运行层发送。因此不需要把决策或控制模块的 Python 文件单独填入平台。已有控制器路径相同，就无需重新填写；下一次启动会读取磁盘上的更新代码。已经运行的队长进程需要先结束，才会加载新代码。
 
-若平台控制器使用本机 main 工作目录，路径分别为 `F:\wangliancar\nevc_auto_main\scripts\StartCaptain.bat` 与 `F:\wangliancar\nevc_auto_main\scripts\KillCaptain.bat`，日志也在该目录的 `runtime_data` 中。两个工作目录各自加载自己的代码；其他分支已修复不代表 main 脚本已更新。核对 `latest_pipeline.json.runtime.project_dir` 和 `target_ingestion_version=sensor-discovery-v2` 可确认实际加载目录和目标接入版本。
+若平台控制器使用本机 main 工作目录，路径分别为 `F:\wangliancar\nevc_auto_main\scripts\StartCaptain.bat` 与 `F:\wangliancar\nevc_auto_main\scripts\KillCaptain.bat`，日志也在该目录的 `runtime_data` 中。两个工作目录各自加载自己的代码；其他分支已修复不代表 main 脚本已更新。核对 `latest_pipeline.json.runtime.project_dir` 和 `target_ingestion_version=sensor-discovery-v2` 可确认实际加载目录和目标接入版本。包含运行诊断更新的版本另记录 `runtime.source.git_commit/git_branch/dirty`，可以直接核对启动时的提交和分支，详见 [运行诊断说明](../RUNTIME_DIAGNOSTICS.md)。
 
 ## 实跑步骤
 
@@ -19,7 +19,7 @@
 2. 在平台“资源库 → 控制器”核对上述开始、结束脚本路径，保存控制器；修改平台控制器后按平台要求刷新本地端。
 3. 在案例页选择该控制器，启动一次**新的仿真运行**。从历史回放中播放不会验证当前代码，也不要同时手动再次启动队长。
 4. 查看 `runtime_data\launcher.log`，确认本次启动时间、巡航参数和本次 `captain-console-*.log` 文件名。
-5. 查看 `runtime_data\captain.log` 的本次“队长启动”和“决策实现”记录。决策版本应为 `decision-constraints-v4`、引擎为 `DecisionEngine`，当前默认应显示 `cruise_speed=8.333 m/s (30.0 km/h)`。路线修正版另有“路线接续实现 version=successor-continuation-v1”及“前方参考”记录。
+5. 查看 `runtime_data\captain.log` 的本次“队长启动”和“决策实现”记录。本次 PR #15/#16 合并版本为 `decision-constraints-v10`、引擎为 `DecisionEngine`，默认应显示 `cruise_speed=8.333 m/s (30.0 km/h)`。路线版本为 `successor-continuation-v4`，另有“前方参考”记录。后续版本以代码和启动记录为准；只看这些算法标签不能确认具体提交。
 6. 查看本次 `runtime_data\latest_pipeline.json`：`runtime` 记录决策版本、路线接续版本、巡航参数、进程号和启动时间；`route_reference` 记录前方车道 ID、状态及点数。再核对来源帧、修改时间、决策、轨迹、控制和 `send`。发送成功应有 `attempted=true`、`ok=true`。旧文件不能证明本次运行成功。
 
 本次接入的是 main 中合并的新规则决策及现有数据合同的兼容修正。巡航参数对所有场景统一生效：平台启动脚本和决策内部默认均为 **30 km/h（30 / 3.6 ≈ 8.333 m/s）**，控制跟踪上限同为 30 km/h。弯道、停车、跟车和安全监护可以要求更低速度；规划基于完整原始地图几何计算弯道约束，避免插值点间距影响曲率限速。若调用者已设置 `NEVC_DECISION_CRUISE_SPEED`，脚本保留该值；这个变量的单位始终是 m/s，不能填入 30 来表示 30 km/h。直接启动 `main.py` 时也采用同一默认巡航。
