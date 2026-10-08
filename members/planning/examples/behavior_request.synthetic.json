@@ -1,0 +1,87 @@
+{
+  "synthetic": true,
+  "production_connected": false,
+  "description": "Authored contract example only; not emitted by production decision, not a Sensor capture or permission to drive.",
+  "request": {
+    "contract_version": "r05-r09-decision-proposal-v1",
+    "interface_status": "proposal_not_runtime_connected",
+    "task_context": {
+      "case_id": "synthetic",
+      "task_id": "trial",
+      "scene_id": 0,
+      "session_id": "session-a"
+    },
+    "intent_id": "intent-a",
+    "maneuver": "KEEP_LANE",
+    "stage": "APPROACH",
+    "revision": 2,
+    "source_frame_id": 90,
+    "produced_frame_id": 100,
+    "produced_at_s": 10,
+    "issued_at_s": 9,
+    "valid_until_s": 10.2,
+    "clock_id": "trial-clock",
+    "dispatch_allowed": false,
+    "status": "REQUESTED",
+    "reason_code": "SYNTHETIC_COMPONENT_ONLY",
+    "attempt": 0,
+    "target_lane_id": "lane-a",
+    "parking_space_id": null,
+    "goal_pose": null,
+    "motion_direction": 1,
+    "speed_cap_mps": 5,
+    "stop_distance_m": -1,
+    "precision_stop": false,
+    "minimum_standstill_duration_s": 0,
+    "parking_brake_at_stop": false,
+    "light_intent": {
+      "left_signal": false,
+      "right_signal": false,
+      "hazard_signal": false
+    },
+    "stop_obligation_id": null
+  },
+  "call_arguments": {
+    "context": {
+      "case_id": "synthetic",
+      "task_id": "trial",
+      "scene_id": 0,
+      "session_id": "session-a"
+    },
+    "frame_id": 100,
+    "now_s": 10,
+    "valid_until_s": 10.2,
+    "clock_id": "trial-clock",
+    "active_identity": {
+      "intent_id": "intent-a",
+      "stage": "APPROACH",
+      "revision": 2,
+      "source_frame_id": 90,
+      "issued_at_s": 9
+    },
+    "capabilities": {
+      "context": {
+        "case_id": "synthetic",
+        "task_id": "trial",
+        "scene_id": 0,
+        "session_id": "session-a"
+      },
+      "actions": [],
+      "produced_at_s": 10,
+      "valid_until_s": 10.2,
+      "clock_id": "trial-clock",
+      "usable": false,
+      "version": "r05-r09-decision-proposal-v1"
+    },
+    "supported_actions": [],
+    "current_lane_id": "lane-a",
+    "frame_usable": true,
+    "frame_paused": false
+  },
+  "expected_result": {
+    "eligible": false,
+    "status": "REJECTED",
+    "reason_code": "REQUEST_NOT_DISPATCHABLE",
+    "production_connected": false
+  }
+}

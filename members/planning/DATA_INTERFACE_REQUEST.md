@@ -1,5 +1,7 @@
 # 下一阶段数据与接口交接请求
 
+2026-10-08：owner 在 [Issue #7 最新回复](https://github.com/lsl1111/wangliancar/issues/7#issuecomment-6051910991) 明确 P01–P09 实现任务，并允许依赖未齐时先交独立算法/测试。本轮基于 main `568e9c9` 推进 L0；与决策 M0 草案对齐的字段、来源/职责、接入验收及能力矩阵见 [新行为分阶段交付](BEHAVIOR_IMPLEMENTATION.md)。任务书中的新增输入仍为需求，公共接口未获批准；下文按日期保留交付历史。
+
 规划侧文件消费准备见 [离线数据验收与规划重算](REPLAY_BUNDLE.md)：核对原时钟、来源、同帧合同和缺失记录，保持拒绝/重复/回退事实；文件外层为交接草案，不批准生产反馈或行为接口。
 
 2026-10-02，核对基线为主仓库 `db1a5c5`。本请求接续 [Issue #7](https://github.com/lsl1111/wangliancar/issues/7) 及 [owner 的交接回复](https://github.com/lsl1111/wangliancar/issues/7#issuecomment-5936047457)，用于协调真实跟车验收与绕障、倒车泊车等后续开发。
