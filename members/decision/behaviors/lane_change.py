@@ -1,0 +1,178 @@
+"""D03 decision strategy: legal corridor, front/rear gap and actual settlement."""
+
+import math
+from core.geometry import project_polyline, normalize_angle
+from members.decision.behaviors.contract import BehaviorGoal, GoalPose, LightIntent, finite, require
+from members.decision.behaviors.observations import Evidence, MotionObject, vehicle_footprint, corridor_contains
+from members.decision.behaviors.session import BehaviorSession
+from members.decision.behaviors.stop_policies import PolicyResult
+
+
+class LaneCandidate(object):
+    def __init__(self, lane_id, side, center_line, width_m, shared_marking,
+                 crossing_allowed, same_direction, evidence, rear_coverage_verified,
+                 objects=(), left_boundary=None, right_boundary=None):
+        require(isinstance(lane_id, str) and bool(lane_id) and side in ("left", "right"), "invalid candidate lane")
+        require(isinstance(center_line, (list, tuple)) and 2 <= len(center_line) <= 20000
+                and all(isinstance(p, (list, tuple)) and len(p) == 2
+                        and all(finite(v) for v in p) for p in center_line), "candidate lane geometry missing")
+        require(finite(width_m) and width_m > 0 and isinstance(evidence, Evidence), "invalid candidate coverage")
+        require(all(type(v) is bool for v in (crossing_allowed, same_direction, rear_coverage_verified)), "invalid crossing flags")
+        require(all(isinstance(o, MotionObject) for o in objects), "invalid lane objects")
+        self.lane_id, self.side, self.center_line, self.width_m = lane_id, side, list(center_line), width_m
+        self.shared_marking, self.crossing_allowed, self.same_direction = shared_marking, crossing_allowed, same_direction
+        for boundary in (left_boundary, right_boundary):
+            require(boundary is None or (isinstance(boundary, (list, tuple)) and len(boundary) >= 2
+                    and all(isinstance(p, (list, tuple)) and len(p) == 2 and all(finite(v) for v in p)
+                            for p in boundary)), "invalid candidate boundary")
+        self.left_boundary, self.right_boundary = left_boundary, right_boundary
+        self.evidence, self.rear_coverage_verified, self.objects = evidence, rear_coverage_verified, tuple(objects)
+
+
+class LaneChangePolicy(object):
+    def __init__(self, front_m, rear_m, half_width_m, min_front_gap_m=10.5,
+                 min_rear_gap_m=10.5, time_headway_s=1.2, maneuver_time_s=4.0,
+                 acceleration_uncertainty_mps2=2.0, indicator_lead_s=1.0,
+                 settle_frames=2, session=None):
+        require(all(finite(v) and v > 0 for v in (front_m, rear_m, half_width_m,
+                min_front_gap_m, min_rear_gap_m, time_headway_s, maneuver_time_s,
+                acceleration_uncertainty_mps2, indicator_lead_s)), "invalid lane-change limits")
+        require(type(settle_frames) is int and settle_frames > 0, "invalid settlement count")
+        self.front_m, self.rear_m, self.half_width_m = front_m, rear_m, half_width_m
+        self.front_gap, self.rear_gap, self.headway = min_front_gap_m, min_rear_gap_m, time_headway_s
+        self.duration, self.uncertainty, self.indicator_lead_s = maneuver_time_s, acceleration_uncertainty_mps2, indicator_lead_s
+        self.settle_frames, self.session = settle_frames, session or BehaviorSession()
+        self.reset()
+
+    def reset(self):
+        self.session.reset()
+        self.selected, self._context, self._settled = None, None, 0
+
+    def opportunity(self, frame, candidate):
+        if not candidate.evidence.verified(frame, allowed_source_kinds=("sensor", "verified_fusion", "synthetic")) or not candidate.rear_coverage_verified:
+            return False, "SIDE_REAR_COVERAGE_UNKNOWN"
+        if candidate.left_boundary is None or candidate.right_boundary is None:
+            return False, "CANDIDATE_BOUNDARIES_UNAVAILABLE"
+        if (not candidate.same_direction or not candidate.crossing_allowed
+                or candidate.shared_marking not in ("DASHED", "BROKEN")):
+            return False, "CROSSING_ILLEGAL_OR_OPPOSITE"
+        if candidate.width_m < 2 * self.half_width_m:
+            return False, "TARGET_LANE_TOO_NARROW"
+        ego = project_polyline(candidate.center_line, frame.ego_x, frame.ego_y)
+        if ego is None or abs(normalize_angle(ego["heading"] - frame.ego_heading)) >= math.pi / 2:
+            return False, "CANDIDATE_DIRECTION_UNVERIFIED"
+        at_target = GoalPose(ego["point"][0], ego["point"][1], ego["heading"])
+        if not corridor_contains(vehicle_footprint(at_target, self.front_m, self.rear_m, self.half_width_m),
+                                 candidate.left_boundary, candidate.right_boundary):
+            return False, "TARGET_BOUNDARY_SPACE_INSUFFICIENT"
+        travel = sum(math.hypot(b[0]-a[0], b[1]-a[1]) for a,b in zip(candidate.center_line, candidate.center_line[1:]))
+        if travel - ego["s"] < frame.ego_speed * self.duration + self.front_m:
+            return False, "CANDIDATE_COVERAGE_TOO_SHORT"
+        for obj in candidate.objects:
+            proj = project_polyline(candidate.center_line, obj.x, obj.y)
+            if proj is None:
+                return False, "TARGET_LANE_OBJECT_PROJECTION_UNKNOWN"
+            if proj["distance"] > candidate.width_m / 2 + obj.width / 2:
+                continue
+            rel = proj["s"] - ego["s"]
+            velocity = math.cos(proj["heading"]) * obj.vx + math.sin(proj["heading"]) * obj.vy
+            extent = 0.5 * math.hypot(obj.length, obj.width)
+            uncertainty = 0.5 * self.uncertainty * self.duration ** 2
+            if rel >= 0:
+                available = rel - extent - self.front_m
+                future = available + (velocity - frame.ego_speed) * self.duration - uncertainty
+                if min(available, future) < self.front_gap + self.headway * frame.ego_speed:
+                    return False, "TARGET_LANE_FRONT_GAP"
+            else:
+                available = -rel - extent - self.rear_m
+                future = available - max(0.0, velocity - frame.ego_speed) * self.duration - uncertainty
+                if min(available, future) < self.rear_gap:
+                    return False, "TARGET_LANE_REAR_CLOSING"
+        return True, "GAP_VERIFIED_WITH_CONSTANT_VELOCITY_UNCERTAINTY"
+
+    def evaluate(self, frame, intent_key, purpose, candidates, capabilities=None,
+                 feedback=None, safety_override=False, preferred_lane_id=None):
+        if not frame.current(frame.observed_at_s):
+            request = self.session.tick(frame, capabilities, safety_override=True) if self.session.intent_id else None
+            return PolicyResult(request, True, "OBSERVATION_UNUSABLE", "RECOVER")
+        if self._context != frame.context.key():
+            self.reset()
+            self._context = frame.context.key()
+        if self.session.status == "COMPLETED":
+            if self.session.key == intent_key:
+                return PolicyResult(self.session.snapshot(frame), False, "TARGET_LANE_SETTLED", "COMPLETE")
+            self.reset()
+            self._context = frame.context.key()
+        require(purpose in ("LANE_CHANGE", "AVOID", "OVERTAKE", "MERGE"), "unsupported lane-change purpose")
+        require(all(isinstance(c, LaneCandidate) for c in candidates), "invalid neighbor observations")
+        if self.selected is None:
+            usable = [c for c in candidates if c.evidence.verified(frame, allowed_source_kinds=("sensor", "verified_fusion", "synthetic")) and c.same_direction
+                      and c.crossing_allowed and c.shared_marking in ("DASHED", "BROKEN")
+                      and c.rear_coverage_verified and c.width_m >= 2 * self.half_width_m
+                      and c.left_boundary is not None and c.right_boundary is not None
+                      and (preferred_lane_id is None or c.lane_id == preferred_lane_id)]
+            if not usable:
+                return PolicyResult(reason="LEGAL_CANDIDATE_GEOMETRY_UNAVAILABLE", phase="BLOCKED")
+            self.selected = min(usable, key=lambda c: (not self.opportunity(frame, c)[0], c.lane_id))
+            lights = LightIntent(left_signal=self.selected.side == "left", right_signal=self.selected.side == "right")
+            self.session.start(frame, intent_key, purpose, "PREPARE",
+                               BehaviorGoal(target_lane_id=self.selected.lane_id,
+                                            speed_cap_mps=frame.ego_speed, light_intent=lights),
+                               ("LANE_CHANGE", "LIGHTS", "FEEDBACK"))
+        current = next((c for c in candidates if c.lane_id == self.selected.lane_id), None)
+        if current is None:
+            request = self.session.block(frame, "SELECTED_CORRIDOR_UNAVAILABLE")
+            return PolicyResult(request, True, request.reason_code, "BLOCKED")
+        self.selected = current
+        safe, reason = self.opportunity(frame, current)
+        if self.session.stage in ("EXECUTE", "SETTLE") and not safe:
+            request = self.session.block(frame, "EXECUTION_CORRIDOR_OBSTRUCTED_NEEDS_RECOVERY_PATH")
+            return PolicyResult(request, True, request.reason_code, "RECOVER")
+        if (self.session.status == "BLOCKED" and safe and self.session.reason_code in
+                ("SELECTED_CORRIDOR_UNAVAILABLE", "EXECUTION_CORRIDOR_OBSTRUCTED_NEEDS_RECOVERY_PATH")):
+            old_stage = self.session.stage
+            if self.session.retry_after_evidence(frame, "CORRIDOR_RECOVERED_REPLAN"):
+                recovery_goal = BehaviorGoal(target_lane_id=current.lane_id, speed_cap_mps=frame.ego_speed,
+                    light_intent=LightIntent(left_signal=current.side == "left", right_signal=current.side == "right"))
+                self.session.advance(frame, "REQUEST_PATH" if old_stage in ("EXECUTE", "SETTLE") else "PREPARE",
+                                     recovery_goal, reason="RECOVERY_PATH_REVALIDATION_REQUIRED")
+        request = self.session.tick(frame, capabilities, feedback, safety_override)
+        if request.status in ("BLOCKED", "SUSPENDED", "CANCELLED"):
+            return PolicyResult(request, True, request.reason_code, request.status)
+        reply = self.session.last_feedback
+        if self.session.stage == "PREPARE":
+            if (reply is not None and reply.producer in ("control", "runtime")
+                    and reply.lights_confirmed and reply.lights_duration_s >= self.indicator_lead_s):
+                request = self.session.advance(frame, "WAIT_GAP", reason="INDICATOR_CONFIRMED")
+        elif self.session.stage == "WAIT_GAP":
+            if safe:
+                request = self.session.advance(frame, "REQUEST_PATH", required=("LANE_CHANGE", "PATH", "LIGHTS", "FEEDBACK"),
+                                               reason="GAP_AVAILABLE_REQUEST_PATH")
+        elif self.session.stage == "REQUEST_PATH":
+            if not safe:
+                request = self.session.advance(frame, "WAIT_GAP", reason=reason)
+            elif reply is not None and reply.producer == "planning" and reply.status == "PLANNED":
+                request = self.session.advance(frame, "EXECUTE", reason="MATCHING_PATH_ACCEPTED")
+        elif self.session.stage in ("EXECUTE", "SETTLE"):
+            reached = False
+            if reply is not None and reply.producer in ("control", "runtime") and reply.actual_pose is not None:
+                pose = reply.actual_pose
+                proj = project_polyline(current.center_line, pose.x, pose.y)
+                corners = vehicle_footprint(pose, self.front_m, self.rear_m, self.half_width_m)
+                corner_projections = [project_polyline(current.center_line, *point) for point in corners]
+                body_inside = (all(p is not None and p["distance"] <= current.width_m / 2
+                                   and 0 <= p["raw_ratio"] <= 1 for p in corner_projections)
+                               and corridor_contains(corners, current.left_boundary, current.right_boundary))
+                reached = (reply.actual_lane_id == current.lane_id and proj is not None and body_inside
+                           and abs(normalize_angle(pose.body_heading_rad - proj["heading"])) <= 0.15)
+            if reached:
+                if self.session.stage == "EXECUTE":
+                    self._settled = 0
+                    request = self.session.advance(frame, "SETTLE", reason="TARGET_LANE_ACTUALLY_REACHED")
+                else:
+                    self._settled += 1
+                    if self._settled >= self.settle_frames:
+                        request = self.session.finish(frame, True, "TARGET_LANE_SETTLED")
+            else:
+                self._settled = 0
+        return PolicyResult(request, not safe, reason, self.session.stage)

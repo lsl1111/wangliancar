@@ -23,6 +23,7 @@ class ConstraintSet(object):
         self.items = []
         self.obstacle_clearance_m = -1.0
         self.obstacle_clearances_m = {}
+        self.blockage_candidates = []
 
     def add(self, kind, source, identifier, reason, distance=None,
             speed=None, valid_until=0.0):
@@ -33,6 +34,9 @@ class ConstraintSet(object):
 
     def first(self, kind):
         items = [item for item in self.items if item.kind == kind]
+        if kind == "FOLLOW":
+            return min(items, key=lambda item: (item.speed if item.speed is not None else float("inf"),
+                                               item.source, str(item.identifier))) if items else None
         return min(items, key=lambda item: item.key()) if items else None
 
     def stop(self):

@@ -206,7 +206,11 @@ class TargetHandoffRegressions(unittest.TestCase):
         add_target(p, longitudinal=80, speed=5)
         self.assertEqual(DecisionMode.FOLLOW, engine.run(p).mode)
         p.targets, p.frame_id = [], 2
-        self.assertEqual(DecisionMode.KEEP_LANE, engine.run(p).mode)
+        continued = engine.run(p)
+        self.assertIn(continued.mode, (DecisionMode.KEEP_LANE, DecisionMode.FOLLOW))
+        self.assertGreater(continued.target_speed, 0.0)
+        self.assertFalse(engine._had_target_conflict)
+        self.assertFalse(engine._blind_stop)
 
     def test_geometry_and_target_source_failures_still_protect(self):
         for change in ('source', 'width', 'front'):

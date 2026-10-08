@@ -43,6 +43,8 @@ class Candidate(object):
         self.motion_relevant = True
         self.motion_supported = False
         self.coverage_stop_distance = None
+        self.route_s = None
+        self.lateral_offset_m = None
 
 
 def build_candidate(target, ego, perception, route, settings):
@@ -72,7 +74,11 @@ def build_candidate(target, ego, perception, route, settings):
                                target.lane_id if target.same_lane_valid is True else None)
     if projection is not None:
         candidate.distance = projection["s"] - route.ego_s
+        candidate.route_s = projection["s"]
         heading = projection["heading"]
+        px, py = projection["point"]
+        candidate.lateral_offset_m = (-math.sin(heading) * (target.x - px)
+                                     + math.cos(heading) * (target.y - py))
     else:
         heading = ego.heading
     candidate.lead_speed = math.cos(heading) * target.vx + math.sin(heading) * target.vy

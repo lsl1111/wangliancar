@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-constraints-v10"
+DECISION_VERSION = "decision-behaviors-m1-on-v10"
 _ENGINE = DecisionEngine()
 
 
@@ -22,6 +22,11 @@ def decision_info():
 def decision_settings():
     """Expose validated session settings to the captain's independent monitor."""
     return _ENGINE.settings
+
+
+def decision_behavior_info():
+    """Diagnostics/proposals only; this is not an execution-feedback channel."""
+    return _ENGINE.behavior_diagnostics()
 
 
 def decide(perception):
