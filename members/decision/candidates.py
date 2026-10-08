@@ -10,7 +10,8 @@ from core.route_motion import lateral_residual, lateral_drift_bound
 from core.geometry import swept_path_distance
 from core.obstacle_geometry import longitudinal_extent, swept_footprint_intersects, footprint_entry
 from core.route_obstacles import (RouteContext, path_reference, motion_guard_distance,
-                                  motion_guard_time, front_reach_reference)
+                                  motion_guard_time, front_reach_reference,
+                                  route_footprint_intersects)
 from core.target_semantics import mapped_traffic_light
 from core.traffic_quality import signal_stop_bound
 
@@ -68,8 +69,7 @@ def build_candidate(target, ego, perception, route, settings):
         successors = getattr(lane, "successor_lane_ids", ())
         if target.lane_id not in successors:
             candidate.relation = OTHER_LANE
-    projection = route.project(target.x, target.y, settings,
-                               target.lane_id if target.same_lane_valid is True else None)
+    projection = route.project_target(target, settings)
     if projection is not None:
         candidate.distance = projection["s"] - route.ego_s
         heading = projection["heading"]
@@ -78,8 +78,7 @@ def build_candidate(target, ego, perception, route, settings):
     candidate.lead_speed = math.cos(heading) * target.vx + math.sin(heading) * target.vy
     candidate.lateral_speed = -math.sin(heading) * target.vx + math.cos(heading) * target.vy
     if projection is not None and candidate.relation in (CURRENT_LANE, FORWARD_ROUTE):
-        width = (lane.lane_width if candidate.relation == CURRENT_LANE and lane.lane_width_valid
-                 else getattr(target, 'lane_width_m', None))
+        width = route.target_width(target)
         if candidate.relation == CURRENT_LANE or target.lane_id in route.spans:
             residual = lateral_residual(route.points, projection, target, width)
             if residual is not None:
@@ -104,6 +103,14 @@ def build_candidate(target, ego, perception, route, settings):
     padding += settings.motion_lateral_margin_m
     guard_time = motion_guard_time(ego.speed, settings.motion_guard_time_s,
                                    settings.motion_deceleration)
+    if (candidate.relation in (CURRENT_LANE, FORWARD_ROUTE)
+            and route_footprint_intersects(perception, target, route,
+                settings.front_offset_m, settings.half_width_m,
+                settings.motion_lateral_margin_m, guard_time,
+                require_aligned=True) is False):
+        # Map lane membership is position evidence, not proof that the body
+        # blocks this route. Keep moving sweeps and the whole known ahead road.
+        return candidate
     if settings.front_offset_m is not None and extent is not None:
         distance = motion_guard_distance(ego.speed, settings.motion_horizon_m,
                                          settings.motion_deceleration, settings.front_offset_m)
@@ -186,8 +193,7 @@ def build_candidate(target, ego, perception, route, settings):
         candidate.stop_distance = max(0.0, candidate.distance - extent
                                       - settings.front_offset_m
                                       - settings.obstacle_stop_margin)
-        width = (lane.lane_width if candidate.relation == CURRENT_LANE and lane.lane_width_valid
-                 else getattr(target, 'lane_width_m', None))
+        width = route.target_width(target)
         try:
             projection['_coverage_checked'] = True
             lateral_drift_bound(target, projection, candidate.lateral_speed, width, guard_time,

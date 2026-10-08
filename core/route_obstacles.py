@@ -68,6 +68,9 @@ class RouteContext(object):
     def __init__(self, perception, settings):
         lane = perception.lane
         self.lane_id = lane.lane_id
+        self.lane_valid = lane.valid is True
+        self.lane_width = (lane.lane_width if lane.lane_width_valid is True
+                           and number(lane.lane_width) and lane.lane_width > 0.1 else None)
         self.current = clean_points(lane.center_line)
         self.points, self.forward_ids, self.spans = self.current, (), {}
         self.projection_reason, self.reason = '', ''
@@ -96,6 +99,9 @@ class RouteContext(object):
                                    getattr(lane, 'forward_lane_spans', []))
 
     def project(self, x, y, settings, lane_id=None):
+        return self._project(x, y, settings, lane_id, settings.projection_tolerance_m)
+
+    def _project(self, x, y, settings, lane_id, lateral_limit):
         self.projection_reason = ''
         if self.ego_s is None or not (number(x) and number(y)):
             self.projection_reason = 'route_anchor_or_target_coordinates_unavailable'
@@ -111,12 +117,63 @@ class RouteContext(object):
             points = self.current
         diagnostics = {}
         result = project_unique(points, x, y, settings.route_ambiguity_m, diagnostics)
-        if result is None or result['distance'] > settings.projection_tolerance_m:
+        if result is None or result['distance'] > lateral_limit:
             self.projection_reason = diagnostics.get('reason', 'outside_route_corridor')
             return None
         result['s'] += offset
         result['index'] += index_offset
         return result
+
+    def project_target(self, target, settings):
+        """Locate a target without relaxing ego/trajectory projection.
+
+        A verified wide lane can contain a target outside the centre-line
+        alignment tolerance. Use its own bounded segment and measured width,
+        with an oriented footprint check, to retain along-road position.
+        This establishes position only; motion and collision checks still run.
+        Ambiguous positions, endpoints and unsupported lane IDs never widen.
+        """
+        lane_id = target.lane_id if target.same_lane_valid is True else None
+        result = self.project(target.x, target.y, settings, lane_id)
+        if result is not None or self.projection_reason != 'outside_route_corridor':
+            return result
+        if (not self.lane_valid or target.valid is not True
+                or target.same_lane_valid is not True or not lane_id):
+            return None
+        # Widening needs the measurement at the target, not just the ego's
+        # width: one map lane ID can have a changing width along its length.
+        measured_width = getattr(target, 'lane_width_m', None)
+        if not number(measured_width) or measured_width <= 0.1:
+            return None
+        width = self.target_width(target)
+        if (not number(width) or width <= 0.1
+                or not all(number(value) for value in
+                           (target.heading, target.length, target.width))
+                or min(target.length, target.width) <= 0):
+            return None
+        result = self._project(target.x, target.y, settings, lane_id, width*.5)
+        if result is None:
+            return None
+        angle = target.heading-result['heading']
+        lateral_extent = .5*(target.length*abs(math.sin(angle))
+                              + target.width*abs(math.cos(angle)))
+        if result['distance']+lateral_extent >= width*.5:
+            self.projection_reason = 'target_footprint_outside_route_lane'
+            return None
+        return result
+
+    def target_width(self, target):
+        """Target-local width; legacy current-lane width is never widening proof."""
+        if target.same_lane_valid is not True or not self.lane_valid:
+            return None
+        measured = getattr(target, 'lane_width_m', None)
+        if target.lane_id == self.lane_id and self.lane_width is not None:
+            width = self.lane_width if measured is None else measured
+        elif target.lane_id in self.forward_ids and target.lane_id in self.spans:
+            width = measured
+        else:
+            return None
+        return width if number(width) and width > 0.1 else None
 
     def ahead(self, distance=None):
         if self.anchor is None:
@@ -174,19 +231,34 @@ def route_footprint_relevant(perception, target, route, planning_settings):
     Include measured pose/heading error so off-centre ego motion is not erased.
     This is an exclusion proof, not a trajectory intention or signal exemption.
     """
+    distance = motion_guard_distance(perception.ego.speed, planning_settings.horizon,
+                                     planning_settings.deceleration,
+                                     planning_settings.front_offset_m)
+    seconds = motion_guard_time(perception.ego.speed, planning_settings.lateral_guard_time_s,
+                                planning_settings.deceleration)
+    return route_footprint_intersects(perception, target, route,
+        planning_settings.front_offset_m, planning_settings.half_width_m,
+        planning_settings.lateral_margin_m, seconds, distance)
+
+
+def route_footprint_intersects(perception, target, route, front_offset, half_width,
+                               margin, seconds, distance=None, require_aligned=False):
+    """Physical strip intersection on a verified straight road, or unknown.
+
+    The full-road decision exclusion requires an aligned measured pose: the
+    decision member does not know a planner's future lateral recovery path.
+    Bends and missing body geometry keep conservative target constraints.
+    """
     lane, ego = perception.lane, perception.ego
     if (route.anchor is None or lane.lane_width_valid is not True
             or not number(lane.lane_width) or lane.lane_width <= 0
+            or not all(number(v) for v in (front_offset, half_width, margin, seconds))
+            or min(front_offset, half_width, seconds) <= 0 or margin < 0
             or not all(number(v) for v in (target.x, target.y, target.vx, target.vy,
                                            target.length, target.width))
             or min(target.length, target.width) <= 0
             or not number(ego.heading)):
         return None
-    distance = motion_guard_distance(ego.speed, planning_settings.horizon,
-                                     planning_settings.deceleration,
-                                     planning_settings.front_offset_m)
-    seconds = motion_guard_time(ego.speed, planning_settings.lateral_guard_time_s,
-                                planning_settings.deceleration)
     points = route.ahead(distance)
     # A lateral strip exactly encloses straight forward body travel. For an
     # unassociated object on a bend it does not certify the front-corner sweep;
@@ -195,14 +267,16 @@ def route_footprint_relevant(perception, target, route, planning_settings):
     if not headings or any(abs(math.atan2(math.sin(h-headings[0]),
                                          math.cos(h-headings[0]))) > EPS for h in headings):
         return None
-    reference = path_reference(front_reach_reference(points,
-                                                     planning_settings.front_offset_m))
+    reference = path_reference(front_reach_reference(points, front_offset))
     if len(reference) < 2:
         return None
     heading_error = ego.heading-route.ego_heading
-    padding = (planning_settings.half_width_m + planning_settings.lateral_margin_m
+    if require_aligned and (route.anchor['distance'] > EPS
+            or abs(math.atan2(math.sin(heading_error), math.cos(heading_error))) > EPS):
+        return None
+    padding = (half_width + margin
                + route.anchor['distance']
-               + planning_settings.front_offset_m*abs(math.sin(heading_error)))
+               + front_offset*abs(math.sin(heading_error)))
     return swept_footprint_intersects(reference, target, padding, seconds)
 
 
@@ -223,11 +297,10 @@ def mapped_route_motion(perception, target, route, settings, front_offset):
     current = target.lane_id == lane.lane_id
     if not current and (target.lane_id not in route.forward_ids or target.lane_id not in route.spans):
         return None
-    width = (lane.lane_width if current and lane.lane_width_valid
-             else getattr(target, 'lane_width_m', None))
+    width = route.target_width(target)
     if not number(width) or width <= 0.1:
         return None
-    projection = route.project(target.x, target.y, settings, target.lane_id)
+    projection = route.project_target(target, settings)
     if projection is None or projection['distance'] > width*.5:
         return None
     angle = target.heading-projection['heading']
