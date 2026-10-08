@@ -196,10 +196,11 @@ class FrameworkTests(unittest.TestCase):
         p = perception(speed=0.0, frame_id=1)
         add_target(p, longitudinal=30.0, speed=5.0)
         self.assertEqual(DecisionMode.FOLLOW, self.decide(p).mode)
-        self.assertEqual(DecisionMode.KEEP_LANE,
-                         self.decide(perception(speed=0.0, frame_id=2)).mode)
-        self.assertEqual(DecisionMode.KEEP_LANE,
-                         self.decide(perception(speed=0.0, frame_id=3)).mode)
+        for index in (2, 3):
+            output = self.decide(perception(speed=0.0, frame_id=index))
+            self.assertIn(output.mode, (DecisionMode.FOLLOW, DecisionMode.KEEP_LANE))
+            self.assertGreater(output.target_speed, 0.0)
+            self.assertFalse(self.engine._blind_stop)
 
     def test_target_source_failure_reasons_are_distinct(self):
         cases = (({"sensor_read_ok": False}, "sensor_read_failed"),

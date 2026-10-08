@@ -15,8 +15,13 @@ FIELDS = (
     "conflict_horizon_s", "recovery_frames", "release_frames",
     "motion_horizon_m", "motion_deceleration", "motion_guard_time_s", "motion_lateral_margin_m",
     "motion_tolerance_mps",
+    "history_max_tracks", "history_samples", "history_age_s", "history_handoff_s",
+    "history_max_gap_s", "history_position_jump_m", "history_braking_uncertainty_mps2",
+    "behavior_feedback_max_age_s", "behavior_ack_timeout_s", "behavior_progress_timeout_s",
+    "behavior_retry_delay_s", "behavior_max_retries", "behavior_observation_gap_s",
+    "signal_dwell_duration_s",
 )
-INT_FIELDS = ("recovery_frames", "release_frames")
+INT_FIELDS = ("recovery_frames", "release_frames", "history_max_tracks", "history_samples", "behavior_max_retries")
 DEPRECATED = ("launch_ttc_cap", "stop_margin")
 
 
@@ -79,7 +84,13 @@ class DecisionSettings(object):
                  release_frames=2, approach_deceleration_ratio=0.5,
                  half_width_m=None, motion_horizon_m=60.0, motion_deceleration=2.0,
                  motion_guard_time_s=3.0, motion_lateral_margin_m=0.0,
-                 motion_tolerance_mps=0.0):
+                 motion_tolerance_mps=0.0, history_max_tracks=128, history_samples=8,
+                 history_age_s=1.0, history_handoff_s=0.4, history_max_gap_s=0.5,
+                 history_position_jump_m=3.0, history_braking_uncertainty_mps2=2.0,
+                 behavior_feedback_max_age_s=0.5, behavior_ack_timeout_s=2.0,
+                 behavior_progress_timeout_s=5.0, behavior_retry_delay_s=0.5,
+                 behavior_max_retries=2, behavior_observation_gap_s=0.5,
+                 signal_dwell_duration_s=5.1):
         for name in FIELDS:
             setattr(self, name, locals()[name])
 
@@ -87,7 +98,8 @@ class DecisionSettings(object):
         for name in FIELDS:
             value = getattr(self, name)
             if name in INT_FIELDS:
-                if type(value) is not int or value < 1:
+                minimum = 0 if name == "behavior_max_retries" else 1
+                if type(value) is not int or value < minimum:
                     raise ValueError("decision setting {0} must be a positive integer".format(name))
                 continue
             if name in ("front_offset_m", "half_width_m") and value is None:
@@ -97,7 +109,12 @@ class DecisionSettings(object):
         for name in ("cruise_speed", "time_headway", "gap_gain", "resume_margin", "follow_deceleration",
                      "emergency_ttc", "static_speed_threshold", "blind_speed_tolerance",
                      "projection_tolerance_m", "route_ambiguity_m", "conflict_horizon_s",
-                     "motion_horizon_m", "motion_deceleration", "motion_guard_time_s"):
+                     "motion_horizon_m", "motion_deceleration", "motion_guard_time_s",
+                     "history_age_s", "history_handoff_s", "history_max_gap_s",
+                     "history_position_jump_m", "history_braking_uncertainty_mps2",
+                     "behavior_feedback_max_age_s", "behavior_ack_timeout_s",
+                     "behavior_progress_timeout_s", "behavior_retry_delay_s",
+                     "behavior_observation_gap_s") :
             if getattr(self, name) <= 0.0:
                 raise ValueError("decision setting {0} must be positive".format(name))
         if self.front_offset_m is not None and self.front_offset_m <= 0.0:
@@ -110,6 +127,12 @@ class DecisionSettings(object):
             raise ValueError("hold_distance must be below resume_margin")
         if not 0.0 < self.approach_deceleration_ratio <= 1.0:
             raise ValueError("approach_deceleration_ratio must be in (0, 1]")
+        if self.history_samples < 2 or self.history_max_tracks > 4096 or self.history_samples > 128:
+            raise ValueError("target history budget must be bounded and contain at least two samples")
+        if self.history_handoff_s > self.history_age_s or self.history_max_gap_s > self.history_age_s:
+            raise ValueError("target history handoff/gap cannot exceed history age")
+        if self.signal_dwell_duration_s <= 5.0:
+            raise ValueError("signal dwell policy must exceed five seconds")
         return self
 
     def replace(self, **overrides):

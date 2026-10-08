@@ -5,6 +5,7 @@ The four public modes remain unchanged; state names below are private.
 """
 
 import math
+import time
 
 from core.interfaces import DecisionMode, DecisionTarget
 from core.geometry import opposes_direction
@@ -14,6 +15,8 @@ from core.scene_requirements import requires_targets, FOLLOW_SCENES, AEB_SCENES
 from members.decision import candidates, protocol, speed_policy
 from members.decision.constraints import ConstraintSet
 from members.decision.settings import DecisionSettings
+from members.decision.target_history import TargetHistory
+from members.decision.behaviors.coordinator import BehaviorCoordinator
 
 
 def _link_frame(perception, output):
@@ -26,12 +29,19 @@ def _link_frame(perception, output):
 
 
 class DecisionEngine(object):
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, clock=None):
+        self._clock = clock or time.monotonic
         self.settings = (settings if settings is not None
                          else DecisionSettings.from_environment()).validate()
         self.reset()
 
     def reset(self):
+        self._history = TargetHistory(self.settings)
+        if hasattr(self, "_behavior"):
+            self._behavior.reset()
+        else:
+            self._behavior = BehaviorCoordinator(self.settings)
+        self._last_constraints = None
         self._blind_fault_count = 0
         self._blind_stop = False
         self._recovery_count = 0
@@ -59,18 +69,29 @@ class DecisionEngine(object):
                        and type(frame_id) is int and frame_id >= 0
                        and type(self._last_frame[0]) is int
                        and frame_id < self._last_frame[0])
-        if context != self._context or rolled_back:
+        trusted = protocol.perception_usable(perception)
+        if self._context is None:
+            self._context = context
+        if (context != self._context or rolled_back) and trusted:
             self.reset()
             self._context = context
         distinct = self._last_frame is None or frame_id != self._last_frame[0]
-        self._last_frame = frame
+        if trusted:
+            self._last_frame = frame
         return distinct
 
     def run(self, perception):
         output = DecisionTarget()
         try:
             _link_frame(perception, output)
-            self._arbitrate(perception, output, self._observe_frame(perception))
+            distinct = self._observe_frame(perception)
+            self._last_constraints = None
+            self._arbitrate(perception, output, distinct)
+            if output.valid and protocol.perception_usable(perception):
+                try:
+                    self._behavior.observe_legacy(perception, output, self._last_constraints, self._clock())
+                except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                    self._behavior.diagnostic_error(output.frame_id, type(exc).__name__)
         except Exception as exc:
             output.valid = False
             output.mode = DecisionMode.STOP
@@ -79,6 +100,11 @@ class DecisionEngine(object):
             output.reason = "DECISION_EXCEPTION:" + type(exc).__name__ + ":" + str(exc)
             output.errors.append("DECISION_EXCEPTION:" + type(exc).__name__)
         return output
+
+    def behavior_diagnostics(self):
+        result = self._behavior.snapshot()
+        result["target_history"] = self._history.snapshot()
+        return result
 
     def _source_reason(self, perception):
         if getattr(perception, "target_source", "") == "ground_truth":
@@ -140,9 +166,14 @@ class DecisionEngine(object):
         for target in perception.targets if protocol.targets_usable(perception) else []:
             item = candidates.build_candidate(target, perception.ego,
                                               perception, route, settings)
+            self._history.observe(perception, item)
             if not item.conflict:
                 continue
             identifier = getattr(target, "id", -1)
+            if self._history.discontinuous(identifier):
+                self._follow_targets.discard(identifier)
+                self._static_targets.pop(identifier, None)
+                self._moving_confirm.pop(identifier, None)
             if type(identifier) is int and identifier >= 0:
                 seen_ids.add(identifier)
             if item.coverage_stop_distance is not None:
@@ -191,7 +222,8 @@ class DecisionEngine(object):
                 continue
             static = item.static
             follow_context = (perception.scene_id in FOLLOW_SCENES
-                              or (identifier in self._follow_targets
+                              or ((identifier in self._follow_targets
+                                   or self._history.was_followed(identifier))
                                   and perception.scene_id not in AEB_SCENES))
             if not static and perception.scene_id not in AEB_SCENES:
                 self._follow_targets.add(identifier)
@@ -238,9 +270,12 @@ class DecisionEngine(object):
                                    identifier, stop_distance),
                                distance=stop_distance,
                                valid_until=perception.valid_until)
+                    if not follow_context and stop_distance is not None:
+                        result.blockage_candidates.append((identifier, stop_distance))
             else:
                 self._emergency_static_targets.discard(identifier)
                 demand = speed_policy.follow_speed(item, ego_speed, cruising, settings)
+                self._history.followed(identifier, demand)
                 result.add("FOLLOW", "target", identifier,
                            "FOLLOW_TARGET:id={0},gap={1:.2f},speed={2:.2f}".format(
                                identifier, item.gap, demand), speed=demand,
@@ -273,6 +308,10 @@ class DecisionEngine(object):
                 self._static_targets.clear()
                 self._moving_confirm.clear()
                 self._target_hazard_ids.clear()
+        for kind, identifier, demand, reason in self._history.retained_constraints(ego_speed, cruising):
+            result.add(kind, "target_history", identifier,
+                       "{0}:id={1}".format(reason, identifier), speed=demand,
+                       valid_until=perception.valid_until)
         return result
 
     def _arbitrate(self, perception, output, distinct):
@@ -303,6 +342,12 @@ class DecisionEngine(object):
                       else 'TRAFFIC_SOURCE:'+signal_stop['reason'])
             self._protect(output, ego.speed, reason)
             return
+        self._history.begin(perception, self._clock(), distinct)
+        if self._history.reset_reason == "SOURCE_CHANGED":
+            self._follow_targets.clear()
+            self._static_targets.clear()
+            self._moving_confirm.clear()
+            self._emergency_static_targets.clear()
         targets_fresh = protocol.targets_usable(perception)
         required = requires_targets(perception.scene_id)
         if required and not targets_fresh:
@@ -321,6 +366,7 @@ class DecisionEngine(object):
         cruising = speed_policy.desired_speed(perception, settings)
         constraints = self._collect(perception, route, ego_speed, cruising,
                                     distinct)
+        self._last_constraints = constraints
         output.obstacle_clearance_m = constraints.obstacle_clearance_m
         output.obstacle_clearances_m = dict(constraints.obstacle_clearances_m)
         emergency = constraints.first("EMERGENCY")
