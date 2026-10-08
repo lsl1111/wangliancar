@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-constraints-v10"
+DECISION_VERSION = "decision-constraints-v11"
 _ENGINE = DecisionEngine()
 
 

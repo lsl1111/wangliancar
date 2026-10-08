@@ -32,11 +32,10 @@ def _route_association(perception, target, settings, route=None):
     if (route.ego_s is None or (target.lane_id != lane.lane_id
             and (target.lane_id not in route.forward_ids or target.lane_id not in route.spans))):
         return None
-    width = (lane.lane_width if target.lane_id == lane.lane_id and lane.lane_width_valid
-             else getattr(target, 'lane_width_m', None))
+    width = route.target_width(target)
     if not number(width) or width <= 0.1:
         return None
-    local = route.project(target.x, target.y, settings, target.lane_id)
+    local = route.project_target(target, settings)
     if local is None or local['distance'] > width*.5:
         return None
     local['s'] -= route.ego_s

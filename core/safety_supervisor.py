@@ -156,6 +156,15 @@ class SafetySupervisor(object):
             ttc = getattr(target, "ttc", None)
             if getattr(target, 'valid', False) and route is not None:
                 try:
+                    intersects = route_footprint_relevant(perception, target, route,
+                                                         planning_settings)
+                except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
+                    intersects = None
+                if intersects is False:
+                    continue
+                if intersects is True:
+                    relevant = True
+                try:
                     motion = mapped_route_motion(perception, target, route,
                         decision_settings, planning_settings.front_offset_m)
                 except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
@@ -170,16 +179,6 @@ class SafetySupervisor(object):
                                  or motion['lead_speed'] < -decision_settings.static_speed_threshold)):
                         return True
                     relevant = True
-                else:
-                    try:
-                        intersects = route_footprint_relevant(perception, target, route,
-                                                             planning_settings)
-                    except (AttributeError, TypeError, ValueError, IndexError, OverflowError):
-                        intersects = None
-                    if intersects is False:
-                        continue
-                    if intersects is True:
-                        relevant = True
             if (getattr(target, "valid", False) and relevant
                     and type(distance) in (int, float) and math.isfinite(distance)
                     and distance > 0 and type(ttc) in (int, float)
