@@ -214,7 +214,7 @@ def _motion(points, direction, vehicle, limits, checks):
         values.append(value)
     if values[0][4] != 0:
         _invalid("candidate must start at relative_time=0")
-    segments, previous = [], None
+    segments, moving, previous = [], [], None
     for index, (a, b) in enumerate(zip(values, values[1:])):
         checks.consume()
         dt = b[4]-a[4]
@@ -260,26 +260,29 @@ def _motion(points, direction, vehicle, limits, checks):
             if rate > limits.max_steer_rate_rad_s+EPS:
                 raise _Stop("unsafe", "MOTION_LIMIT", "steering_rate", segment=index, observed=rate)
         previous = steer, midpoint_time
-        segments.append((a, b, ds, turn, acceleration))
+        segment = (a, b, ds, turn, acceleration)
+        segments.append(segment)
+        if ds > EPS:
+            moving.append((index, segment, model_speed))
     # Heading metadata cannot conceal the geometric turning demand of a path.
     # These circumcircle and steering-rate checks supplement the yaw-per-distance
     # model; both remain discrete constraints rather than a continuous actuator proof.
+    # Pair the real moving legs across stationary samples, without removing their
+    # time occupancy from segments. Arrival times retain the original rate clock.
     previous = None
-    for index in range(1, len(values)-1):
+    for incoming, outgoing in zip(moving, moving[1:]):
         checks.consume()
-        a, b, c = values[index-1:index+2]
-        ab, bc, ac = (math.hypot(b[0]-a[0], b[1]-a[1]),
-                      math.hypot(c[0]-b[0], c[1]-b[1]),
-                      math.hypot(c[0]-a[0], c[1]-a[1]))
-        if min(ab, bc) <= EPS:
-            continue  # Stationary samples carry no extra path curvature.
+        index = incoming[0] + 1
+        a, b = incoming[1][:2]
+        c, d = outgoing[1][:2]
+        before, after = (b[0]-a[0], b[1]-a[1]), (d[0]-c[0], d[1]-c[1])
+        ab, bc = incoming[1][2], outgoing[1][2]
+        ac = math.hypot(before[0]+after[0], before[1]+after[1])
         if ac <= EPS:
             raise _Stop("unsafe", "MOTION_LIMIT", "path_fold", point=index)
-        geometric = 2*_cross((b[0]-a[0], b[1]-a[1]), (c[0]-a[0], c[1]-a[1]))/(ab*bc*ac)
+        geometric = 2*_cross(before, after)/(ab*bc*ac)
         steer = math.atan(vehicle.wheelbase_m*geometric/direction)
-        adjacent = segments[index-1:index+1]
-        speed = max(max(s[0][3], s[1][3]) *
-                    (s[2]/(.5*(s[0][3]+s[1][3])*(s[1][4]-s[0][4]))) for s in adjacent)
+        speed = max(incoming[2], outgoing[2])
         lateral = speed**2*abs(geometric)
         _finite((geometric, steer, lateral))
         if abs(steer) > limits.max_front_steer_rad+EPS:

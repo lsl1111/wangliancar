@@ -363,6 +363,140 @@ class CandidateValidationTests(unittest.TestCase):
         self.assert_rejected(report, "MOTION_LIMIT")
         self.assertIn("steer", report["constraint"], report)
 
+    def test_stationary_samples_cannot_hide_geometric_steering_limit(self):
+        # Curvature = 2*.09/(1+.09^2), requiring atan(.8*curvature)
+        # = .14188rad. Zero-speed dwell samples cannot make .05rad feasible.
+        expected = math.atan(0.8 * 0.18 / 1.0081)
+        leg_time = 2.0 * math.hypot(1.0, 0.09)
+        for direction in (1, -1):
+            for sign in (1, -1):
+                for count in (1, 3):
+                    with self.subTest(direction=direction, sign=sign, count=count):
+                        points = [point(-direction, sign * 0.09),
+                                  point(0.0, speed=0.0, at=leg_time)]
+                        points.extend(point(0.0, speed=0.0, at=leg_time + n)
+                                      for n in range(1, count + 1))
+                        points.append(point(direction, sign * 0.09,
+                                            at=2.0 * leg_time + count))
+                        report = self.validate(points, direction=direction,
+                            motion=limits(max_front_steer_rad=0.05))
+                        self.assert_rejected(report, "MOTION_LIMIT")
+                        self.assertEqual(report["constraint"], "steering", report)
+                        self.assertAlmostEqual(report["details"]["observed"], expected)
+                        self.assertEqual(report["details"]["point"], 1)
+
+    def test_stationary_sample_cannot_hide_adjacent_moving_lateral_limit(self):
+        # Moving legs reach 2m/s, so v^2*k = 4*.18/1.0081 > .5m/s^2,
+        # even though all copies of the turning vertex have zero speed.
+        leg_time = math.hypot(1.0, 0.09)
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                report = self.validate(
+                    [point(-direction, 0.09, speed=2.0),
+                     point(0.0, speed=0.0, at=leg_time),
+                     point(0.0, speed=0.0, at=leg_time + 1.0),
+                     point(direction, 0.09, speed=2.0, at=2.0 * leg_time + 1.0)],
+                    direction=direction,
+                    motion=limits(max_lateral_acceleration_mps2=0.5))
+                self.assert_rejected(report, "MOTION_LIMIT")
+                self.assertEqual(report["constraint"], "lateral_acceleration", report)
+                self.assertAlmostEqual(report["details"]["observed"], 4.0 * 0.18 / 1.0081)
+
+    def test_feasible_turn_with_hold_preserves_original_time_and_samples(self):
+        leg_time = 2.0 * math.hypot(1.0, 0.09)
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                points = [point(-direction, 0.09),
+                          point(0.0, speed=0.0, at=leg_time),
+                          point(0.0, speed=0.0, at=leg_time + 1.0),
+                          point(direction, 0.09, at=2.0 * leg_time + 1.0)]
+                original = copy.deepcopy([vars(p) for p in points])
+                report = self.validate(points, direction=direction,
+                                       motion=limits(max_front_steer_rad=0.2))
+                self.assertEqual(report["status"], "safe", report)
+                self.assertEqual(report["details"]["segment_count"], 3)
+                self.assertAlmostEqual(report["details"]["validated_horizon_s"],
+                                       2.0 * leg_time + 1.0)
+                self.assertEqual([vars(p) for p in points], original)
+
+    def test_straight_path_with_multiple_holds_is_safe_in_both_directions(self):
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                report = self.validate(
+                    [point(-2.0 * direction),
+                     point(-direction, speed=0.0, at=2.0),
+                     point(-direction, speed=0.0, at=3.0),
+                     point(-direction, speed=0.0, at=4.0),
+                     point(0.0, at=6.0)], direction=direction,
+                    motion=limits(max_front_steer_rad=0.05))
+                self.assertEqual(report["status"], "safe", report)
+                self.assertEqual(report["details"]["segment_count"], 4)
+                self.assertEqual(report["details"]["validated_horizon_s"], 6.0)
+
+    def test_leading_and_trailing_holds_do_not_create_geometric_turns(self):
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                report = self.validate(
+                    [point(-direction, speed=0.0),
+                     point(-direction, speed=0.0, at=1.0),
+                     point(0.0, at=3.0),
+                     point(direction, speed=0.0, at=5.0),
+                     point(direction, speed=0.0, at=6.0),
+                     point(direction, speed=0.0, at=7.0)], direction=direction)
+                self.assertEqual(report["status"], "safe", report)
+                self.assertEqual(report["details"]["validated_horizon_s"], 7.0)
+
+    def test_dynamic_collision_during_hold_retains_time_occupancy(self):
+        # The target crosses (0,0) at t=4. A four-second stop occupies it
+        # then; the same two moving legs without the stop finish elsewhere.
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                geometry = vehicle(0.2, 0.2, 0.1, 0.15)
+                target = obstacle(0.0, 4.0, 0.1, 0.1, vy=-1.0)
+                moving = [point(-direction), point(0.0, speed=0.0, at=2.0),
+                          point(direction, at=4.0)]
+                clear = self.validate(moving, direction=direction, geometry=geometry,
+                                      obstacles=[target])
+                self.assertEqual(clear["status"], "safe", clear)
+                stopped = moving[:2] + [point(0.0, speed=0.0, at=6.0),
+                                        point(direction, at=8.0)]
+                report = self.validate(stopped, direction=direction, geometry=geometry,
+                                       obstacles=[target])
+                self.assert_rejected(report, "OBSTACLE_COLLISION")
+                self.assertGreater(report["details"]["relative_time_s"], 2.0)
+                self.assertLess(report["details"]["relative_time_s"], 6.0)
+
+    def test_hold_samples_still_require_zero_speed_and_no_body_rotation(self):
+        for speed, heading in ((0.01, 0.0), (0.0, 0.01)):
+            with self.subTest(speed=speed, heading=heading):
+                report = self.validate(
+                    [point(-1.0), point(0.0, speed=0.0, at=2.0),
+                     point(0.0, speed=speed, heading=heading, at=3.0),
+                     point(1.0, at=5.0)])
+                self.assert_rejected(report, "INVALID_INPUT")
+                self.assertIn("stationary segment", report["details"]["message"])
+
+    def test_geometric_steering_rate_across_hold_uses_original_elapsed_time(self):
+        travel = math.hypot(1.0, 0.09)
+        leg_time = 2.0 * travel
+        steer_change = 2.0 * math.atan(0.8 * 0.18 / 1.0081)
+        for direction in (1, -1):
+            for hold, expected in ((0.1, "unsafe"), (1.0, "safe")):
+                with self.subTest(direction=direction, hold=hold):
+                    report = self.validate(
+                        [point(-direction, 0.09),
+                         point(0.0, speed=0.0, at=leg_time),
+                         point(0.0, speed=0.0, at=leg_time + hold),
+                         point(direction, 0.09, at=2.0 * leg_time + hold),
+                         point(2.0 * direction, at=2.0 * leg_time + hold + travel)],
+                        direction=direction, motion=limits(max_steer_rate_rad_s=0.1))
+                    self.assertEqual(report["status"], expected, report)
+                    if expected == "unsafe":
+                        self.assert_rejected(report, "MOTION_LIMIT")
+                        self.assertEqual(report["constraint"], "steering_rate", report)
+                        self.assertAlmostEqual(report["details"]["observed"],
+                                               steer_change / (leg_time + hold))
+
     def test_non_increasing_time_is_invalid(self):
         report = self.validate([point(0.0), point(1.0, at=0.0)])
         self.assert_rejected(report, "INVALID_INPUT")
