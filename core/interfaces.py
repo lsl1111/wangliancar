@@ -201,6 +201,10 @@ class ManeuverEnvironment(FrameOutput):
         self.free_regions = []
         self.parking_spaces = []
         self.crossing_regions = []
+        # Static semantic facts from the exact loaded OpenDRIVE document.
+        # Road-s intervals are not world corridors or visibility certificates.
+        self.map_semantics = {}
+        self.junctions = []
         self.status = {}
         self.valid = False
 

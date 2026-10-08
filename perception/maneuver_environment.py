@@ -141,6 +141,20 @@ class ManeuverEnvironmentBuilder(object):
         except Exception as exc:
             env.neighbor_lanes = []
             env.status["neighbor_lanes"] = "query_failed:"+type(exc).__name__
+        if hasattr(self.route_manager,"read_maneuver_map"):
+            try:
+                env.map_semantics,env.junctions = self.route_manager.read_maneuver_map(
+                    perception.ego,perception.lane,env.neighbor_lanes)
+                map_source = "sdk_matched_opendrive" if env.map_semantics.get("semantic_verified") is True else "unavailable"
+                env.map_semantics["evidence"] = _evidence(env,map_source,"map",False)
+                for neighbor in env.neighbor_lanes:
+                    if neighbor.get("marking_map_digest"):
+                        neighbor["marking_evidence"] = _evidence(env,"sdk_matched_opendrive","map",False)
+                for junction in env.junctions:
+                    junction["evidence"] = _evidence(env,"sdk_matched_opendrive","map",False)
+            except Exception as exc:
+                env.map_semantics = dict(verified=False,reason="MAP_SEMANTICS_QUERY:"+type(exc).__name__)
+                env.junctions = []
         self._parking(perception,env,complete,coverage)
         self._crossings(perception,env,complete,coverage)
         return env

@@ -16,6 +16,8 @@ class AppConfig(object):
         coverage = values.get("sensor_visibility_file", "").strip()
         self.sensor_visibility_file = (os.path.abspath(os.path.join(project_dir, coverage))
                                        if coverage else "")
+        map_file = values.get("map_document_file", "").strip()
+        self.map_document_file = (os.path.abspath(os.path.join(project_dir,map_file)) if map_file else "")
         self.loop_hz = max(1.0, float(values.get("loop_hz", "20")))
         self.sensor_timeout_ms = max(1, int(values.get("sensor_timeout_ms", "500")))
         self.max_sensor_frame_gap = max(0, int(values.get("max_sensor_frame_gap", "10")))

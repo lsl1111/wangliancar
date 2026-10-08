@@ -10,6 +10,7 @@ from core.geometry import (nearest_path_error, normalize_angle, project_polyline
 from core.interfaces import LaneContext
 from core.route_segments import verified_spans
 from core.region_geometry import simple_outline
+from perception.maneuver_map import ManeuverMap
 
 
 def _sdk_string(value):
@@ -146,6 +147,10 @@ class RouteManager(object):
         self._last_ego_at = None
         self._neighbor_samples = {}
         self._neighbor_sample_at = 0.0
+        self._maneuver_map = ManeuverMap(adapter)
+
+    def read_maneuver_map(self,ego,lane,neighbors):
+        return self._maneuver_map.observe(ego,lane,neighbors)
 
     def set_route_hint(self, points, valid, context=None):
         """Static task waypoints select branches; they are not trajectory points."""
