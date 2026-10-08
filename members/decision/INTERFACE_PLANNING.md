@@ -1,3 +1,5 @@
+> 2026-10-08 补充可执行的 [R05～R09 行为合同提案](BEHAVIOR_HANDOFF.md) 与 [D01～D09 依赖矩阵](BEHAVIOR_IMPLEMENTATION.md)。这些新增类型仅在决策私有模块中，队长未落地公共传输；现有 DecisionTarget/Trajectory 协议仍按下文消费。
+
 # 决策 ↔ 规划 接口现状与交接
 
 V1 决策曾在 PR #4 提交；当前通用决策框架沿用固定 `Perception → DecisionTarget → Trajectory` 协议。这里只记录现在的接口语义与仍需跨成员确认的项目，旧版“非空目标一律被规划拒绝”的结论已被 [带目标轨迹约束](../planning/OBSTACLE_GUARD.md) 部分取代。
