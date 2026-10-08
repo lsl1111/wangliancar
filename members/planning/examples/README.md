@@ -8,6 +8,7 @@
 | [recording_manifest.template.json](recording_manifest.template.json) | R01–R04 | 环境、当前车辆绑定、评分口径、采集文件和事件标注的交付模板；未知值为 `null` |
 | [vehicle_response.template.json](vehicle_response.template.json) | R02、R03 | 指令/回执/反馈/停车测量的建议输入列，全部测量值待填，不是运行接口 |
 | [protocol_proposals.synthetic.json](protocol_proposals.synthetic.json) | R05–R09 | 待队长批准的反馈、邻道/路线、行为目标、泊车/路口观测讨论样例；未加入公共接口，禁止直接作为生产输入 |
+| [behavior_request.synthetic.json](behavior_request.synthetic.json) | P01 / 决策 M0 对齐 | 完整平铺请求与独立校验参数；手写现有模式试验，默认不可派发/无能力，预期结构化拒绝；不是生产决策已接入的新字段 |
 | [replay_manifest.synthetic.json](replay_manifest.synthetic.json)、[replay_frames.synthetic.jsonl](replay_frames.synthetic.jsonl)、[replay_events.synthetic.json](replay_events.synthetic.json) | R04 / 规划侧消费 | 三行手写合成输入与离线计算轨迹；控制未执行，第三行故意过期并标诊断 GT，展示不完整交付报告；不是真实连续事件包 |
 
 2026-10-05 按 main `cbb80e4` 更新当前接口单帧例子：补充已贯通的按目标净距/精确停车、目标所属车道宽度和路线点索引分段。具体字段状态与独立回放格式见 [离线验收与规划重算](../REPLAY_BUNDLE.md)。这里的新 JSONL 外层格式只供文件交接讨论，尚未接入运行层采集器，也不修改公共类。
