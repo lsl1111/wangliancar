@@ -94,14 +94,16 @@ class BehaviorSession(object):
         self._event(frame, self.reason_code)
         return self.snapshot(frame)
 
-    def advance(self, frame, stage, goal=None, required=None, reason="STAGE_ADVANCED"):
+    def advance(self, frame, stage, goal=None, required=None, reason="STAGE_ADVANCED",
+                force_revision=False):
         require(self.intent_id is not None and self.context.key() == frame.context.key()
                 and frame.current(frame.observed_at_s) and not frame.paused, "no current matching active intent")
         require(isinstance(stage, str) and bool(stage), "invalid stage")
+        require(type(force_revision) is bool, "invalid revision flag")
         if self.status in ("COMPLETED", "CANCELLED") or (self.status == "BLOCKED"
                 and self.reason_code != "CAPABILITY_OR_CONTRACT_UNAVAILABLE"):
             return self.snapshot(frame)
-        if stage == self.stage:
+        if stage == self.stage and not force_revision:
             if goal is not None:
                 self.goal = goal
             return self.snapshot(frame)

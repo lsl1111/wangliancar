@@ -240,6 +240,94 @@ class ManeuverPolicyTests(unittest.TestCase):
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=GoalPose(25,0,0),progress=1)).request
         self.assertEqual("COMPLETED",r.status)
         self.assertEqual(identity,r.intent_id)
+        for index, kind in ((10, "normal"), (11, "missing"), (12, "unknown_rear")):
+            f = frame(index, (index - 1) * 0.1)
+            facts = None if kind == "missing" else parking(f, rear=kind != "unknown_rear")
+            same = policy.evaluate(f, facts, caps(f))
+            self.assertEqual("COMPLETE", same.phase)
+            self.assertEqual("COMPLETED", same.request.status)
+            self.assertEqual(identity, same.request.intent_id)
+            self.assertFalse(same.request.dispatch_allowed)
+
+    def test_updated_parking_boundary_blocks_old_goal_and_recovery_requires_new_feedback(self):
+        policy = ParkingPolicy(3.5, 0.9, 0.9)
+        f = frame()
+        policy.evaluate(f, parking(f), caps(f))
+        original_goal = policy.park_goal
+        request = policy.session.advance(f, "REVERSE_ENTRY", policy._goal(original_goal, -1, True))
+        f = frame(2, 0.1)
+        small = parking(f, boundary=[(8.5,-1), (11.5,-1), (11.5,1), (8.5,1)])
+        blocked = policy.evaluate(f, small, caps(f), feedback(request, f,
+            producer="control", status="ARRIVED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=original_goal, progress=1))
+        self.assertEqual("BLOCKED", blocked.request.status)
+        self.assertTrue(blocked.hold_required)
+        self.assertFalse(blocked.request.dispatch_allowed)
+        self.assertNotEqual("PARKED_DWELL", blocked.request.stage)
+        f = frame(3, 0.2)
+        recovered = policy.evaluate(f, parking(f), caps(f), feedback(request, f,
+            producer="control", status="ARRIVED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=original_goal, progress=1))
+        self.assertEqual("REVERSE_ENTRY", recovered.request.stage)
+        self.assertGreater(recovered.request.revision, request.revision)
+        self.assertIsNone(policy.session.last_feedback)
+        self.assertIs(original_goal, policy.park_goal)
+        self.assertGreater(recovered.request.goal.speed_cap_mps, 0)
+        f = frame(4, 0.3)
+        arrived = policy.evaluate(f, parking(f), caps(f), feedback(recovered.request, f,
+            producer="control", status="ARRIVED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=original_goal, progress=1))
+        self.assertEqual("PARKED_DWELL", arrived.request.stage)
+
+    def test_updated_parking_boundary_checks_actual_body_without_moving_selected_goal(self):
+        policy = ParkingPolicy(3.5, 0.9, 0.9)
+        f = frame()
+        policy.evaluate(f, parking(f), caps(f))
+        goal = policy.park_goal
+        request = policy.session.advance(f, "REVERSE_ENTRY", policy._goal(goal, -1, True))
+        f = frame(2, 0.1)
+        refined = parking(f, boundary=[(7.75,-1.5), (13,-1.5), (13,1.5), (7.75,1.5)])
+        actual = GoalPose(goal.x - 0.1, goal.y, goal.body_heading_rad)
+        self.assertTrue(policy._body_clear(goal, refined, refined.spaces[0]))
+        self.assertFalse(policy._body_clear(actual, refined, refined.spaces[0]))
+        result = policy.evaluate(f, refined, caps(f), feedback(request, f,
+            producer="control", status="ARRIVED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=actual, progress=1))
+        self.assertEqual("ALIGN", result.request.stage)
+        self.assertIs(goal, policy.park_goal)
+
+    def test_cancelled_parking_keeps_terminal_state_on_next_frame(self):
+        policy = ParkingPolicy(3.5, 0.9, 0.9)
+        f = frame()
+        initial = policy.evaluate(f, parking(f), caps(f))
+        policy.session.finish(f, False, "TASK_CANCELLED")
+        f = frame(2, 0.1)
+        result = policy.evaluate(f, parking(f), caps(f))
+        self.assertEqual("CANCELLED", result.request.status)
+        self.assertEqual(initial.request.intent_id, result.request.intent_id)
+        self.assertFalse(result.request.dispatch_allowed)
+
+    def test_dwell_completion_requires_actual_body_inside_latest_boundary(self):
+        policy = ParkingPolicy(3.5, 0.9, 0.9)
+        f = frame()
+        policy.evaluate(f, parking(f), caps(f))
+        goal = policy.park_goal
+        request = policy.session.advance(f, "PARKED_DWELL", policy._goal(goal, -1, True))
+        f = frame(2, 0.1)
+        refined = parking(f, boundary=[(7.75,-1.5), (13,-1.5), (13,1.5), (7.75,1.5)])
+        actual = GoalPose(goal.x - 0.1, goal.y, goal.body_heading_rad)
+        held = policy.evaluate(f, refined, caps(f), feedback(request, f,
+            producer="control", status="COMPLETED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=actual, progress=1,
+            hold_completed=True, standstill_duration_s=10))
+        self.assertEqual("PARKED_DWELL", held.request.stage)
+        self.assertTrue(held.hold_required)
+        f = frame(3, 0.2)
+        completed = policy.evaluate(f, parking(f), caps(f), feedback(held.request, f,
+            producer="control", status="COMPLETED", actual_standstill_confirmed=True,
+            goal_pose_arrived=True, actual_pose=goal, progress=1,
+            hold_completed=True, standstill_duration_s=10))
+        self.assertEqual("EXIT_PREPARE", completed.request.stage)
 
     def test_wrong_parking_pose_cannot_start_dwell(self):
         policy=ParkingPolicy(3.5,0.9,0.9)

@@ -84,6 +84,10 @@ class ParkingPolicy(object):
         if self._context != frame.context.key():
             self.reset()
             self._context = frame.context.key()
+        if self.session.status in ("COMPLETED", "CANCELLED"):
+            request = self.session.snapshot(frame)
+            return PolicyResult(request, request.status == "CANCELLED", request.reason_code,
+                                "COMPLETE" if request.status == "COMPLETED" else "CANCELLED")
         if not isinstance(facts, ParkingFacts) or not facts.evidence.verified(frame, allowed_source_kinds=("sensor", "verified_fusion", "synthetic")):
             request = self.session.tick(frame, capabilities, safety_override=True) if self.session.intent_id else None
             return PolicyResult(request, bool(request), "FREE_SPACE_OCCUPANCY_COVERAGE_UNKNOWN", "RECOVER" if request else "SEARCH")
@@ -118,8 +122,11 @@ class ParkingPolicy(object):
                 or observed_space.occupancy != "empty"):
             request = self.session.block(frame, "SELECTED_PARKING_OCCUPANCY_UNKNOWN_OR_OCCUPIED")
             return PolicyResult(request, True, request.reason_code, "BLOCKED")
-        if not self._body_clear(self.session.goal.goal_pose, facts,
-                                self.space if self.session.stage in ("REVERSE_ENTRY", "ALIGN", "PARKED_DWELL") else None):
+        # Keep the selected poses stable, but validate them against fresh space
+        # boundaries. A refined observation must not certify the old geometry.
+        if ((self.session.stage != "EXIT" and not self._body_clear(self.park_goal, facts, observed_space))
+                or not self._body_clear(self.session.goal.goal_pose, facts,
+                    observed_space if self.session.stage in ("REVERSE_ENTRY", "ALIGN", "PARKED_DWELL") else None)):
             request = self.session.block(frame, "NEW_PARKING_GOAL_OBSTRUCTION")
             return PolicyResult(request, True, request.reason_code, "BLOCKED")
         if (self.session.status == "BLOCKED" and self.session.reason_code in
@@ -140,6 +147,8 @@ class ParkingPolicy(object):
             return PolicyResult(request, True, request.reason_code, request.status)
         reply = self.session.last_feedback
         stage = self.session.stage
+        parked = (self._arrived(reply, self.park_goal)
+                  and self._body_clear(reply.actual_pose, facts, observed_space))
         if stage == "APPROACH" and self._arrived(reply, self.space.approach_pose):
             request = self.session.advance(frame, "POSITION", self._goal(self.space.position_pose), reason="APPROACH_ACTUALLY_STOPPED")
         elif stage == "POSITION" and self._arrived(reply, self.space.position_pose):
@@ -147,16 +156,16 @@ class ParkingPolicy(object):
                                            required=("PARK", "PATH", "REVERSE", "DWELL", "FEEDBACK"),
                                            reason="ENTRY_POSITION_ACTUALLY_STOPPED")
         elif stage in ("REVERSE_ENTRY", "ALIGN"):
-            if self._arrived(reply, self.park_goal) and self._body_clear(reply.actual_pose, facts, self.space):
+            if parked:
                 request = self.session.advance(frame, "PARKED_DWELL", self._goal(self.park_goal, -1, True), reason="WHOLE_BODY_ACTUALLY_PARKED")
             elif (reply is not None and reply.producer in ("control", "runtime")
                   and reply.actual_standstill_confirmed and reply.progress >= 1.0 and stage == "REVERSE_ENTRY"):
                 request = self.session.advance(frame, "ALIGN", self._goal(self.park_goal, -1, True), reason="PARKING_POSE_ALIGNMENT_REQUIRED")
         elif stage == "PARKED_DWELL":
-            if reply is not None and self._arrived(reply, self.park_goal) and reply.hold_completed and reply.standstill_duration_s >= self.dwell_s:
+            if parked and reply.hold_completed and reply.standstill_duration_s >= self.dwell_s:
                 request = self.session.advance(frame, "EXIT_PREPARE", self._goal(self.park_goal, -1), reason="TEN_SECOND_DWELL_ACTUALLY_COMPLETED")
         elif stage == "EXIT_PREPARE":
-            if (self._arrived(reply, self.park_goal) and facts.exit_goal is not None
+            if (parked and facts.exit_goal is not None
                     and self._body_clear(facts.exit_goal, facts)):
                 request = self.session.advance(frame, "EXIT", self._goal(facts.exit_goal, 1), reason="STOPPED_AND_EXIT_GOAL_VERIFIED")
         elif stage == "EXIT" and self._arrived(reply, self.session.goal.goal_pose):

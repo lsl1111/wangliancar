@@ -74,6 +74,25 @@ class BehaviorContractTests(unittest.TestCase):
         self.assertFalse(request.dispatch_allowed)
         self.assertEqual("CAPABILITY_OR_CONTRACT_UNAVAILABLE", request.reason_code)
 
+    def test_forced_same_stage_revision_rejects_old_feedback_and_preserves_retry_budget(self):
+        session, initial = self.start()
+        session.block(frame(), "RECOVERABLE_EVIDENCE")
+        f = frame(2, 0.1)
+        self.assertTrue(session.retry_after_evidence(f, "EVIDENCE_RECOVERED"))
+        request = session.tick(f, capabilities(f))
+        f = frame(3, 0.2)
+        revised = session.advance(f, "APPROACH", force_revision=True)
+        self.assertEqual(initial.intent_id, revised.intent_id)
+        self.assertGreater(revised.revision, request.revision)
+        self.assertEqual(request.attempt, revised.attempt)
+        self.assertEqual(1, revised.attempt)
+        self.assertEqual(f.frame_id, revised.source_frame_id)
+        session.tick(f, capabilities(f), feedback(request, f))
+        self.assertIsNone(session.last_feedback)
+        f = frame(4, 0.3)
+        session.tick(f, capabilities(f), feedback(revised, f))
+        self.assertEqual("ACCEPTED", session.status)
+
     def test_feedback_from_previous_source_frame_is_accepted_when_fresh(self):
         session, request = self.start()
         produced = frame(2, 0.1)

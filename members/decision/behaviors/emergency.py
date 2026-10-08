@@ -61,7 +61,9 @@ class EmergencyPolicy(object):
             self._danger_id = danger_id
         elif dangerous and danger_id != self._danger_id:
             self._danger_id, self.selected = danger_id, None
-            self.session.advance(frame, "SELECT", BehaviorGoal(), reason="NEW_DANGER_REPLAN")
+            # A new danger invalidates candidates even while still selecting.
+            self.session.advance(frame, "SELECT", BehaviorGoal(), reason="NEW_DANGER_REPLAN",
+                                 force_revision=True)
         request = self.session.tick(frame, capabilities, execution_feedback)
         if dangerous:
             self._clear = 0

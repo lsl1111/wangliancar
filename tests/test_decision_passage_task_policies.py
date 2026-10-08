@@ -165,6 +165,46 @@ class PassageTaskPolicyTests(unittest.TestCase):
         self.assertIsNone(result.selected)
         self.assertTrue(result.immediate_brake_required)
 
+    def test_new_danger_while_selecting_invalidates_old_candidate_and_accepts_new_one(self):
+        policy = EmergencyPolicy()
+        f = frame()
+        initial = policy.evaluate(f, evidence(f), "danger-A", True, capabilities=caps(f))
+        old_choice = EmergencyCandidate("left-for-A", "LEFT",
+            feedback(initial.request, f, candidate_id="left-for-A"), True, 0, 0,
+            BehaviorGoal(target_lane_id="left", speed_cap_mps=1), True, True)
+        f = frame(2, 0.1)
+        changed = policy.evaluate(f, evidence(f), "danger-B", True, [old_choice], caps(f))
+        self.assertIsNone(changed.selected)
+        self.assertEqual("SELECT", changed.request.stage)
+        self.assertEqual(initial.request.intent_id, changed.request.intent_id)
+        self.assertGreater(changed.request.revision, initial.request.revision)
+        self.assertEqual(f.frame_id, changed.request.source_frame_id)
+        self.assertEqual(f.observed_at_s, changed.request.issued_at_s)
+        self.assertTrue(changed.immediate_brake_required)
+        f = frame(3, 0.2)
+        new_choice = EmergencyCandidate("right-for-B", "BRAKE_RIGHT",
+            feedback(changed.request, f, candidate_id="right-for-B"), True, 0, 0,
+            BehaviorGoal(target_lane_id="right"), True, True)
+        selected = policy.evaluate(f, evidence(f), "danger-B", True, [new_choice], caps(f))
+        self.assertEqual("right-for-B", selected.selected)
+        self.assertEqual("EXECUTE_BRAKE_RIGHT", selected.phase)
+
+    def test_new_danger_with_no_capabilities_invalidates_feedback_before_recovery(self):
+        policy = EmergencyPolicy()
+        f = frame()
+        initial = policy.evaluate(f, evidence(f), "danger-A", True)
+        f = frame(2, 0.1)
+        changed = policy.evaluate(f, evidence(f), "danger-B", True)
+        self.assertGreater(changed.request.revision, initial.request.revision)
+        self.assertFalse(changed.request.dispatch_allowed)
+        f = frame(3, 0.2)
+        old_choice = EmergencyCandidate("old", "BRAKE",
+            feedback(initial.request, f, candidate_id="old"), True, 0, 0)
+        recovered = policy.evaluate(f, evidence(f), "danger-B", True, [old_choice], caps(f))
+        self.assertIsNone(recovered.selected)
+        self.assertEqual("SELECT", recovered.request.stage)
+        self.assertTrue(recovered.immediate_brake_required)
+
     def test_emergency_requires_verified_recovery_then_can_handle_new_danger(self):
         policy=EmergencyPolicy()
         f=frame()
