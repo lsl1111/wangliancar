@@ -43,6 +43,13 @@ def validate_output(value, expected, source):
                        for key, gap in value.obstacle_clearances_m.items())):
             raise ValueError("invalid per-target clearance")
     elif expected is Trajectory:
+        identity = value.behavior_identity
+        if (not isinstance(value.stop_obligation_id,str) or (identity is not None and
+                (not isinstance(identity,dict) or set(identity)!={"intent_id","stage","revision"}
+                 or not all(isinstance(identity.get(k),str) and identity[k] for k in ("intent_id","stage"))
+                 or type(identity.get("revision")) is not int or identity["revision"]<1
+                 or not value.stop_obligation_id or value.hold_duration_s<=0))):
+            raise ValueError("invalid behavior execution identity")
         if (not number(value.target_speed) or value.target_speed < 0
                 or len(value.points) < 2 or type(value.emergency_stop) is not bool
                 or type(value.stop_required) is not bool

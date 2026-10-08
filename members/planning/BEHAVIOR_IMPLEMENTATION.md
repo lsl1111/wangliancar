@@ -1,5 +1,9 @@
 # 新行为规划：分阶段交付
 
+更新：基于 main `aa65aeb` 的集成第一阶段已接入正式行为通道和 P07 信号停点/停留，
+复用本模块前进规划器。详见[当前交接与剩余交付](../../perception/MANEUVER_ENVIRONMENT.md)。
+下文能力矩阵为 PR #21 的历史交付，P03/P04 等生成器仍未完成，不能据此声明已启用。
+
 2026-10-08，原始基线 main `568e9c983e568237009015e911c4092731d8e949`，审查修复已同步到包含决策 PR #20 的 main `5fb96ab`。任务来源为 [owner 在 Issue #7 补充的任务书](https://github.com/lsl1111/wangliancar/issues/7#issuecomment-6051910991)，开发顺序为 L0–L5，完整目标为 P01–P09。本文件记录当前进度，不把基础组件交付等同于全部行为完成。
 
 本轮使用项目 path-planning 工作流，仅新增规划私有组件、样例和测试。保留固定 `plan(perception, decision)`、前进链算法、公共类及 Python 3.6；没有把决策私有类、诊断文件或 `reason` 文本作为生产通道。

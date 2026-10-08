@@ -2,7 +2,7 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-behaviors-m1-on-v10"
+DECISION_VERSION = "decision-behaviors-runtime-stop-v1"
 _ENGINE = DecisionEngine()
 
 
@@ -25,7 +25,7 @@ def decision_settings():
 
 
 def decision_behavior_info():
-    """Diagnostics/proposals only; this is not an execution-feedback channel."""
+    """Diagnostic copy only; execution feedback uses the public channel."""
     return _ENGINE.behavior_diagnostics()
 
 

@@ -1,5 +1,12 @@
 # 决策运行接入与版本记录
 
+## 2026-10-08：感知与正式信号停留交接
+
+基线 main `aa65aeb`，运行标识 `decision-behaviors-runtime-stop-v1`。本分支接入公共
+能力/请求/上一帧反馈，D01 的信号停点与连续停留通过原规划/控制执行；其他新动作
+继续受实际输入和能力限制。范围与验证见[正式交接](../../perception/MANEUVER_ENVIRONMENT.md)。
+后文是原决策 PR #20 的基线记录。
+
 ## 2026-10-08：当前行为策略与目标交接
 
 基线为 `main 568e9c9`，开发分支为 `codex/decision-behaviors-m0-m1`，运行标识为 `decision-behaviors-m1-on-v10`。本轮按 M0～M5 提交 D01～D09 可独立推进的决策代码；具体进入、退出、恢复条件与能力矩阵见 [行为实现](BEHAVIOR_IMPLEMENTATION.md)，公共接口需求见 [行为交接](BEHAVIOR_HANDOFF.md)。

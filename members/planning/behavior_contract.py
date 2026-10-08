@@ -71,7 +71,7 @@ def _strings(value, reason):
     return set(value)
 
 
-def _goal(request, current_lane_id):
+def _goal(request, current_lane_id, runtime_stop=False):
     lane, parking, pose = (request[key] for key in ("target_lane_id", "parking_space_id", "goal_pose"))
     _require(lane is None or _text(lane), "TARGET_LANE_INVALID")
     _require(parking is None or type(parking) is int, "PARKING_TARGET_INVALID")
@@ -103,15 +103,21 @@ def _goal(request, current_lane_id):
     _require(_text(current_lane_id), "CURRENT_LANE_UNKNOWN", True)
     _require(lane is None or lane == current_lane_id, "UNSUPPORTED_TARGET_LANE")
     _require(parking is None and pose is None, "UNSUPPORTED_POSE_OR_PARKING_TARGET")
-    _require(obligation is None, "UNSUPPORTED_STOP_OBLIGATION")
-    _require(dwell == 0 and not request["parking_brake_at_stop"] and not any(lights.values()),
-             "UNSUPPORTED_STOP_EXTENSIONS")
+    if runtime_stop:
+        _require(request["maneuver"]=="SIGNAL_STOP" and request["stage"]=="STOP_AND_DWELL"
+                 and obligation is not None and dwell>5 and request["precision_stop"]
+                 and not request["parking_brake_at_stop"] and not any(lights.values()),
+                 "UNSUPPORTED_RUNTIME_STOP")
+    else:
+        _require(obligation is None, "UNSUPPORTED_STOP_OBLIGATION")
+        _require(dwell == 0 and not request["parking_brake_at_stop"] and not any(lights.values()),
+                 "UNSUPPORTED_STOP_EXTENSIONS")
 
 
 def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                             clock_id, active_identity, capabilities=None,
                             supported_actions=(), current_lane_id="",
-                            frame_usable=False, frame_paused=True):
+                            frame_usable=False, frame_paused=True, runtime_stop=False):
     """Validate one proposal for an explicitly enabled forward component trial.
 
     ``now_s`` is the actual check time in ``clock_id``; the current frame's
@@ -150,8 +156,8 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                  and _finite(active_identity["issued_at_s"])
                  and active_identity["issued_at_s"] <= now_s, "ACTIVE_IDENTITY_INVALID")
         _keys(request, _REQUEST_KEYS, "REQUEST_SCHEMA")
-        _require(request["contract_version"] == CONTRACT_VERSION
-                 and request["interface_status"] == "proposal_not_runtime_connected", "REQUEST_VERSION")
+        _require(type(runtime_stop) is bool and request["contract_version"] == CONTRACT_VERSION
+                 and request["interface_status"] == ("runtime_connected" if runtime_stop else "proposal_not_runtime_connected"), "REQUEST_VERSION")
         _context(request["task_context"], "REQUEST_CONTEXT_INVALID")
         _require(request["task_context"] == context, "REQUEST_CONTEXT_MISMATCH")
         _require(type(request["revision"]) is int and request["revision"] >= 1, "REQUEST_REVISION_INVALID")
@@ -171,11 +177,12 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
         _require(isinstance(request["reason_code"], str) and type(request["attempt"]) is int
                  and request["attempt"] >= 0, "REQUEST_VALUES")
         enabled = _strings(supported_actions, "LOCAL_ACTIONS_INVALID")
-        _require(enabled <= set(COMPONENT_ACTIONS), "LOCAL_ACTIONS_UNSUPPORTED")
+        implemented = ("SIGNAL_STOP",) if runtime_stop else COMPONENT_ACTIONS
+        _require(enabled <= set(implemented), "LOCAL_ACTIONS_UNSUPPORTED")
         action = request["maneuver"]
-        _require(action in COMPONENT_ACTIONS, "UNSUPPORTED_MANEUVER")
+        _require(action in implemented, "UNSUPPORTED_MANEUVER")
         _require(action in enabled, "LOCAL_ACTION_DISABLED")
-        _goal(request, current_lane_id)
+        _goal(request, current_lane_id, runtime_stop)
         _require(capabilities is not None, "CAPABILITIES_UNAVAILABLE", True)
         _keys(capabilities, _CAPABILITY_KEYS, "CAPABILITY_SCHEMA")
         _context(capabilities["context"], "CAPABILITY_CONTEXT_INVALID")
@@ -187,10 +194,10 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                  "CAPABILITY_NOT_CURRENT", True)
         actions = _strings(capabilities["actions"], "CAPABILITY_ACTIONS_INVALID")
         required = "PATH_STOP" if request["stop_distance_m"] >= 0 else "PATH"
-        missing = sorted(set((required,)) - actions)
+        missing = sorted(set((required,"DWELL","FEEDBACK") if runtime_stop else (required,)) - actions)
         _require(not missing, "CAPABILITY_ACTIONS_MISSING", True, missing)
         result.update(eligible=True, status="READY_FOR_COMPONENT", reason_code="CONTRACT_CHECKED",
-                      request=copy.deepcopy(request))
+                      request=copy.deepcopy(request),production_connected=runtime_stop)
     except _Rejected as error:
         result.update(reason_code=error.reason_code, retryable=error.retryable,
                       missing_capabilities=list(error.missing))

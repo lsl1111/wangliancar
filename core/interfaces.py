@@ -178,6 +178,33 @@ class TrafficControl(object):
         self.valid = False
 
 
+class ManeuverEnvironment(FrameOutput):
+    """Captain-owned R06/R08/R09 facts; validity never means all space is clear.
+
+    World metres, body yaw radians, process-local monotonic seconds. Each
+    geometry/occupancy/coverage record carries its own source and quality.
+    Unknown coverage must remain unknown even on a valid, empty Sensor frame.
+    """
+
+    def __init__(self):
+        super(ManeuverEnvironment, self).__init__()
+        self.contract_version = "maneuver-environment-v1"
+        self.case_id = ""
+        self.task_id = ""
+        self.scene_id = 0
+        self.observed_at_s = 0.0
+        self.dynamic_observed_at_s = 0.0
+        self.dynamic_valid_until = 0.0
+        self.neighbor_lanes = []
+        self.objects = []
+        self.coverage_regions = []
+        self.free_regions = []
+        self.parking_spaces = []
+        self.crossing_regions = []
+        self.status = {}
+        self.valid = False
+
+
 class Perception(object):
     """Captain -> decision member."""
 
@@ -198,6 +225,10 @@ class Perception(object):
         self.map_crosswalks = []
         self.map_crosswalks_valid = False
         self.map_observation_status = {}
+        self.maneuver_environment = ManeuverEnvironment()
+        # Captain-owned task/session scoped capabilities and previous-frame
+        # feedback. Empty means new behaviors cannot dispatch.
+        self.behavior_channel = {}
         self.speed_limit_observations = []
         # Scenario waypoints are route hints, not a planned trajectory.
         self.route_points = []
@@ -250,6 +281,9 @@ class DecisionTarget(FrameOutput):
         self.reason = ""
         self.valid = False
 
+        self.behavior_request = None
+        self.behavior_active_identity = None
+
 
 class TrajectoryPoint(object):
     def __init__(self, x=0.0, y=0.0, speed=0.0, heading=0.0, relative_time=0.0):
@@ -284,6 +318,9 @@ class Trajectory(FrameOutput):
         self.hazard_signal = False
         self.reason = ""
         self.valid = False
+        self.stop_obligation_id = ""
+        self.behavior_identity = None
+        self.behavior_feedback = None
 
 
 class ControlOut(FrameOutput):
@@ -303,6 +340,8 @@ class ControlOut(FrameOutput):
         self.valid = False
         self.source = ""
         self.diagnostics = {}
+        # Actual controller observations; send receipts cannot prove arrival.
+        self.execution_observation = None
 
     def clamp(self):
         values = (self.throttle, self.brake, self.steering)

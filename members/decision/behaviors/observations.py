@@ -28,60 +28,8 @@ class Evidence(object):
                 and frame.current(frame.observed_at_s) and not frame.paused)
 
 
-def polygon(raw):
-    require(isinstance(raw, (tuple, list)) and 3 <= len(raw) <= 128, "polygon coverage missing")
-    points = []
-    for item in raw:
-        require(isinstance(item, (tuple, list)) and len(item) == 2
-                and all(finite(v) for v in item), "invalid polygon coordinate")
-        points.append((float(item[0]), float(item[1])))
-    area = sum(a[0] * b[1] - a[1] * b[0] for a, b in zip(points, points[1:] + points[:1]))
-    require(abs(area) > 1e-8, "degenerate polygon")
-    signs = []
-    for i in range(len(points)):
-        a, b, c = points[i - 1], points[i], points[(i + 1) % len(points)]
-        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
-        if abs(cross) > 1e-8:
-            signs.append(cross > 0)
-    require(bool(signs) and all(s == signs[0] for s in signs), "nonconvex or ambiguous polygon")
-    return points
-
-
-def inside(point, region):
-    signs = []
-    for a, b in zip(region, region[1:] + region[:1]):
-        cross = (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
-        if abs(cross) > 1e-8:
-            signs.append(cross > 0)
-    return not signs or all(s == signs[0] for s in signs)
-
-
-def intersects(left, right):
-    for shape in (left, right):
-        for a, b in zip(shape, shape[1:] + shape[:1]):
-            nx, ny = -(b[1] - a[1]), b[0] - a[0]
-            l = [nx * p[0] + ny * p[1] for p in left]
-            r = [nx * p[0] + ny * p[1] for p in right]
-            if max(l) < min(r) - 1e-8 or max(r) < min(l) - 1e-8:
-                return False
-    return True
-
-
-def hull(points):
-    ordered = sorted(set(points))
-    require(len(ordered) >= 3, "insufficient swept footprint")
-    def cross(a, b, c):
-        return (b[0]-a[0]) * (c[1]-a[1]) - (b[1]-a[1]) * (c[0]-a[0])
-    lower, upper = [], []
-    for p in ordered:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(p)
-    for p in reversed(ordered):
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(p)
-    return lower[:-1] + upper[:-1]
+# Shared geometry preserves the existing decision entry points.
+from core.region_geometry import convex_polygon as polygon, inside, intersects, hull
 
 
 def vehicle_footprint(pose, front, rear, half_width):

@@ -200,6 +200,7 @@ class ControlEngine(object):
                     ((direction == -1 or self.direction.pending_direction is not None) and
                      abs(vector_speed - ego.speed) > self.settings.gear_standstill_speed_mps)):
                 raise ValueError("reverse or invalid velocity magnitude disagrees with ego speed")
+            self.standstill.request(trajectory)
             if self.standstill.update(ego, dt, self.settings):
                 return self._braking_output(output, ego, "DWELL", 0,
                                             self.standstill.parking_brake)

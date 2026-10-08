@@ -4,9 +4,11 @@ import math
 
 from members.planning.lane_planner import build_trajectory, PlannerSettings
 from core.interfaces import DecisionTarget, Trajectory
+from members.planning.stop_behavior import StopBehaviorPlanner
 
 
 _CONTROL_GEOMETRY = {}
+_BEHAVIOR_PLANNER = StopBehaviorPlanner()
 
 
 def _settings_with_control_geometry():
@@ -25,7 +27,8 @@ def configure_planning(config=None):
     This is an explicit trial capability, not a claim of live calibration.
     Body extents continue to come from the shared NEVC_VEHICLE_* overrides.
     """
-    global _CONTROL_GEOMETRY
+    global _CONTROL_GEOMETRY,_BEHAVIOR_PLANNER
+    _BEHAVIOR_PLANNER = StopBehaviorPlanner()
     geometry = {}
     if config is not None and getattr(config, "control_calibrated", False):
         for name in ("wheelbase_m", "front_steer_max_rad"):
@@ -49,4 +52,6 @@ def plan(perception, decision):
         output.reason = str(exc)
         output.errors.append(str(exc))
         return output
+    if getattr(decision,"behavior_request",None) is not None:
+        return _BEHAVIOR_PLANNER.plan(perception,decision,settings)
     return build_trajectory(perception, decision, settings)

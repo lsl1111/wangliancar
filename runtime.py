@@ -14,6 +14,7 @@ from core.scene_requirements import requires_targets
 from members.control_stub import compute_control, configure_control
 from members.decision_stub import decide, decision_info, decision_settings, reset_decision
 from members.planning_stub import plan, configure_planning
+from core.behavior_channel import BehaviorTransport
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, ROUTE_REFERENCE_VERSION
 from simone_platform.simone_adapter import SimOneAdapter
@@ -107,6 +108,8 @@ class CaptainRuntime(object):
                                   "planning_settings": dict(vars(planning_settings)),
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
+        self.behaviors = BehaviorTransport(("PATH_STOP","DWELL","FEEDBACK")
+                                          if getattr(config,"control_calibrated",False) else ())
 
     def request_stop(self, unused_signal=None, unused_frame=None):
         self.stop_requested = True
@@ -189,6 +192,7 @@ class CaptainRuntime(object):
                                  perception.frame_id, perception.valid)
             repeated = last_frame == perception.frame_id
             last_frame = perception.frame_id
+            self.behaviors.prepare(perception)
             try:
                 decision = _member_output(decide(perception), DecisionTarget, perception)
             except Exception as exc:
@@ -242,6 +246,7 @@ class CaptainRuntime(object):
                     self._warned_no_control = True
                 else:
                     receipt["reason"] = "pipeline_invalid"
+            self.behaviors.observe(perception,decision,trajectory,control,safety.active,receipt)
             # Flush after sending control, so file I/O cannot expire its frame.
             self._flush_evaluation()
             if self.config.publish_json:
@@ -396,6 +401,7 @@ class CaptainRuntime(object):
                 "crosswalk_count": len(perception.map_crosswalks),
                 "speed_limits": to_dict(perception.speed_limit_observations),
                 "status": to_dict(perception.map_observation_status)},
+            "maneuver_environment": to_dict(perception.maneuver_environment),
             "decision": to_dict(decision), "trajectory": to_dict(trajectory),
             "control": to_dict(control), "safety": {
                 "mode": safety.mode, "reason": safety.reason,

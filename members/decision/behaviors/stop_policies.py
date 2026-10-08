@@ -83,7 +83,7 @@ class SignalDwellPolicy(object):
             self._stop_id, self._arrived, self._phase = observation.stop_id, False, "APPROACH"
         goal = BehaviorGoal(goal_pose=observation.goal_pose,
                             speed_cap_mps=0.0 if self._arrived else observation.speed_cap_mps,
-                            stop_distance_m=observation.stop_distance_m,
+                            stop_distance_m=0.0 if self._arrived else observation.stop_distance_m,
                             precision_stop=True,
                             minimum_standstill_duration_s=self.minimum_duration_s,
                             stop_obligation_id="signal:" + observation.stop_id)

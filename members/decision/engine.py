@@ -92,6 +92,9 @@ class DecisionEngine(object):
                     self._behavior.observe_legacy(perception, output, self._last_constraints, self._clock())
                 except (ValueError, TypeError, AttributeError, KeyError) as exc:
                     self._behavior.diagnostic_error(output.frame_id, type(exc).__name__)
+                    if self._behavior.execution_pending():
+                        output.behavior_request,output.behavior_active_identity = None,None
+                        self._protect(output,perception.ego.speed,"BEHAVIOR_CHANNEL_FAILURE:"+type(exc).__name__)
         except Exception as exc:
             output.valid = False
             output.mode = DecisionMode.STOP
