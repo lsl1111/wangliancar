@@ -1,0 +1,80 @@
+{
+  "data_kind": "synthetic_authored_protocol_proposal",
+  "requirement_ids": [
+    "R05",
+    "R07"
+  ],
+  "source_is_runtime_observation": false,
+  "expected_result": "Inactive proposal; unusable feedback cannot complete the stop obligation",
+  "maneuver_goal_proposal": {
+    "contract_version": "r05-r09-decision-proposal-v1",
+    "interface_status": "proposal_not_runtime_connected",
+    "task_context": {
+      "case_id": "synthetic_case",
+      "task_id": "synthetic_task",
+      "scene_id": 20,
+      "session_id": "synthetic_session"
+    },
+    "intent_id": "decision:0afc603f624fa720:1",
+    "maneuver": "SIGNAL_STOP",
+    "stage": "STOP_AND_DWELL",
+    "revision": 1,
+    "source_frame_id": 100,
+    "produced_frame_id": 100,
+    "produced_at_s": 1.0,
+    "issued_at_s": 1.0,
+    "valid_until_s": 1.2,
+    "clock_id": "process_monotonic",
+    "dispatch_allowed": false,
+    "status": "BLOCKED",
+    "reason_code": "CAPABILITY_OR_CONTRACT_UNAVAILABLE",
+    "attempt": 0,
+    "target_lane_id": null,
+    "parking_space_id": null,
+    "goal_pose": null,
+    "motion_direction": 1,
+    "speed_cap_mps": 0.0,
+    "stop_distance_m": 12.0,
+    "precision_stop": false,
+    "minimum_standstill_duration_s": 5.1,
+    "parking_brake_at_stop": false,
+    "light_intent": {
+      "left_signal": false,
+      "right_signal": false,
+      "hazard_signal": false
+    },
+    "stop_obligation_id": "signal:synthetic"
+  },
+  "execution_feedback_proposal": {
+    "producer": "control",
+    "intent_id": "decision:0afc603f624fa720:1",
+    "stage": "STOP_AND_DWELL",
+    "revision": 1,
+    "task_context": {
+      "case_id": "synthetic_case",
+      "task_id": "synthetic_task",
+      "scene_id": 20,
+      "session_id": "synthetic_session"
+    },
+    "status": "REJECTED",
+    "reason_code": "CONTRACT_UNCONNECTED",
+    "source_frame_id": 100,
+    "produced_frame_id": 100,
+    "produced_at_s": 1.0,
+    "valid_until_s": 1.2,
+    "clock_id": "process_monotonic",
+    "usable": false,
+    "retryable": false,
+    "progress": 0.0,
+    "actual_standstill_confirmed": false,
+    "goal_pose_arrived": false,
+    "standstill_duration_s": 0.0,
+    "hold_completed": false,
+    "lights_confirmed": false,
+    "lights_duration_s": 0.0,
+    "actual_lane_id": null,
+    "actual_pose": null,
+    "motion_direction": 1,
+    "candidate_id": null
+  }
+}
