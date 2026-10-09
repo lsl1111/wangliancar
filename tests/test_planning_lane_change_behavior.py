@@ -338,8 +338,11 @@ class PlanningLaneChangeBehaviorTests(unittest.TestCase):
             planning_stub._LANE_CHANGE_PLANNER._staging(self.f.p,d,self.settings,model,0,self.f.p.valid_until,2.5)
 
     def test_actual_fixed_entries_transport_and_policy_complete_original_intent(self):
+        self.assert_continuous_completion()
+
+    def assert_continuous_completion(self,withdraw_original=False):
         r,d,t=self.execute(); initial=r.intent_id
-        plant=BidirectionalPlant(x=10.,lag=.3); stages=set(); switched=False
+        plant=BidirectionalPlant(x=10.,lag=.3); stages=set(); switched=False; withdrawn=False
         supervisor=SafetySupervisor(NS(send_control=True),self.f.clock,planning_settings=self.settings)
         for unused in range(700):
             c=control_stub.compute_control(self.f.p,t)
@@ -350,6 +353,16 @@ class PlanningLaneChangeBehaviorTests(unittest.TestCase):
             plant.step(c,.05,self.calibration)
             current=TARGET if plant.y>=1.75 else SOURCE
             self.h.advance(plant.x,plant.y,plant.heading,current,plant.speed)
+            corners=[plant.y+along*math.sin(plant.heading)+across*math.cos(plant.heading)
+                     for along in (-.9,3.9) for across in (-.9,.9)]
+            if withdraw_original and current==TARGET and min(corners)>1.8 and max(corners)<5.2:
+                withdrawn=True
+            if withdrawn:
+                # The current formal B geometry/objects/view remain. The
+                # original neighbor and its permission are no longer supplied.
+                self.f.p.maneuver_environment.neighbor_lanes=[]
+                self.f.p.maneuver_environment.road_regions=[v for v in
+                    self.f.p.maneuver_environment.road_regions if v['lane_id']==TARGET]
             self.f.p.ego.yaw_rate=plant.yaw_rate
             self.curvature=math.tan(plant.steering*self.calibration.front_steer_max_rad/
                                     self.calibration.steering_sign)/self.calibration.wheelbase_m
@@ -364,10 +377,12 @@ class PlanningLaneChangeBehaviorTests(unittest.TestCase):
             self.assertFalse(result.hold_required,result.reason)
             d=self.decision(r); t=planning_stub.plan(self.f.p,d)
             self.assertTrue(t.valid,(plant.x,plant.y,t.errors,result.reason))
+            if withdrawn: self.assertEqual('CURRENT_TARGET_NOMINAL_CONTINUATION_PATH',t.reason)
             self.assertEqual(GoalPose(35.,3.5,0.).to_dict(),d.behavior_request['goal_pose'])
         self.assertTrue(switched)
         self.assertIn('EXECUTE',stages); self.assertIn('SETTLE',stages)
         self.assertEqual('COMPLETED',r.status)
+        if withdraw_original: self.assertTrue(withdrawn)
 
 
 if __name__=='__main__': unittest.main()

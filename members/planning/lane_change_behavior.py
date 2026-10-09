@@ -179,10 +179,6 @@ class LaneChangeBehaviorPlanner(object):
             require(previous_binding is None or binding==previous_binding,'LANE_CHANGE_ACTIVE_BINDING_CHANGED')
             require(previous_binding is not None or request['stage']=='REQUEST_PATH',
                     'LANE_CHANGE_REQUEST_PATH_REQUIRED')
-            side=facts.crossing(request['target_lane_id'],request['source_lane_id'])['side']
-            require(request['light_intent']['left_signal']==(side=='left')
-                    and request['light_intent']['right_signal']==(side=='right'),
-                    'LANE_CHANGE_INDICATOR_SIDE_MISMATCH')
             pose=request['goal_pose']
             model.budget.deadline_monotonic_s=min(model.budget.deadline_monotonic_s,
                 time.monotonic()+deadline-self.clock())
@@ -190,8 +186,15 @@ class LaneChangeBehaviorPlanner(object):
                 min(decision.target_speed,request['speed_cap_mps']),model.vehicle,model.limits,
                 model.search,model.budget,model.prediction_envelopes,self.clock,model.geometry_cache,
                 source_lane_id=request['source_lane_id'],
-                fixed_goal_pose=tuple(pose[k] for k in ('x','y','body_heading_rad')))
+                fixed_goal_pose=tuple(pose[k] for k in ('x','y','body_heading_rad')),
+                allow_target_lane_continuation=previous_binding is not None
+                    and request['stage'] in ('EXECUTE','SETTLE'))
             require(result['status']=='safe',result['reason_code'])
+            if result['path_scope']=='source_bound_crossing':
+                side=result['crossing_side']
+                require(request['light_intent']['left_signal']==(side=='left')
+                        and request['light_intent']['right_signal']==(side=='right'),
+                        'LANE_CHANGE_INDICATOR_SIDE_MISMATCH')
             require(self.clock()<deadline,'LANE_CHANGE_SOURCE_EXPIRED_DURING_DISPATCH')
             validate_output(decision,DecisionTarget,p)
             require(result['frame_id']==p.frame_id and result['map_digest']==digest,
@@ -227,7 +230,8 @@ class LaneChangeBehaviorPlanner(object):
             output.left_signal=request['light_intent']['left_signal']
             output.right_signal=request['light_intent']['right_signal']
             output.behavior_identity={key:request[key] for key in ('intent_id','stage','revision')}
-            output.reason='SOURCE_BOUND_NOMINAL_LANE_CHANGE_PATH'
+            output.reason=('CURRENT_TARGET_NOMINAL_CONTINUATION_PATH'
+                if result['path_scope']=='current_target_lane' else 'SOURCE_BOUND_NOMINAL_LANE_CHANGE_PATH')
             output.valid=True
             return validate_output(output,Trajectory,decision)
         except (ValueError,TypeError,AttributeError,KeyError,OverflowError) as error:

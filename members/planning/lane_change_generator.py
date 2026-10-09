@@ -290,6 +290,16 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
                          target_reference, speed_cap_mps, vehicle, limits,
                          crossing_corridor, coverage, obstacles, search, budget,
                          target_corridor, fixed_goal_pose=None):
+    """Generate a crossing only with the original source-bound corridor."""
+    return _generate_lane_connector(start_pose,initial_speed_mps,initial_curvature_m_inv,
+        target_reference,speed_cap_mps,vehicle,limits,crossing_corridor,coverage,obstacles,
+        search,budget,target_corridor,fixed_goal_pose)
+
+
+def _generate_lane_connector(start_pose, initial_speed_mps, initial_curvature_m_inv,
+                             target_reference, speed_cap_mps, vehicle, limits,
+                             crossing_corridor, coverage, obstacles, search, budget,
+                             target_corridor, fixed_goal_pose=None, current_target_only=False):
     """Return the first certified candidate in explicit deterministic order.
 
     Independent sweeps and target-body containment share one budget/deadline. An output is
@@ -298,13 +308,27 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
     """
     report = dict(status='invalid', reason_code='INVALID_INPUT', points=[],
                   attempts=[], checks=0, motion_direction=1,
+                  path_scope='current_target_lane' if current_target_only else 'source_bound_crossing',
                   authority='nominal_candidate_only')
     work = None
     try:
         _parameters(start_pose, initial_speed_mps, initial_curvature_m_inv, speed_cap_mps,
                     vehicle, limits, search, budget)
         work = _Work(budget); work.step()
-        _require(isinstance(crossing_corridor, CrossingCorridor), 'SOURCE_BOUND_CROSSING_CORRIDOR_REQUIRED')
+        if current_target_only:
+            _require(crossing_corridor is target_corridor and isinstance(target_corridor,CorridorRegion)
+                     and fixed_goal_pose is not None,'CURRENT_TARGET_CONTINUATION_INPUT_INVALID')
+            # Geometry-only probe. Neither a stationary execution observation
+            # nor a substitute for the actual starting speed/curvature below.
+            probe=[TrajectoryPoint(start_pose[0],start_pose[1],0.,start_pose[2],at) for at in (0.,1.)]
+            body=work.validate(probe,vehicle,limits,target_corridor,[])
+            report['current_body_report']=body
+            if body['status']!='safe':
+                report.update(status=body['status'],reason_code=('CURRENT_TARGET_BODY_OUTSIDE'
+                    if body['status']=='unsafe' and body['constraint']=='corridor' else body['reason_code']))
+                return report
+        else:
+            _require(isinstance(crossing_corridor, CrossingCorridor), 'SOURCE_BOUND_CROSSING_CORRIDOR_REQUIRED')
         _require(coverage is not None, 'VISIBILITY_REGION_REQUIRED')
         _require(target_corridor is not None, 'TARGET_LANE_REGION_REQUIRED')
         reference, stations, origin = _reference(target_reference, start_pose,
@@ -343,7 +367,8 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
                                 attempt['target_pose_report'] = target_body
                                 if target_body['status'] == 'safe':
                                     work.step()
-                                    report.update(status='safe', reason_code='NOMINAL_LANE_CHANGE_CANDIDATE_READY',
+                                    report.update(status='safe', reason_code=('NOMINAL_TARGET_LANE_CONTINUATION_READY'
+                                        if current_target_only else 'NOMINAL_LANE_CHANGE_CANDIDATE_READY'),
                                                   points=points, target_pose=goal, path_distance_m=sum(lengths),
                                                   legal_report=legal, visibility_report=visible,
                                                   target_pose_report=target_body)
@@ -379,7 +404,8 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
 def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_inv,
                                speed_cap_mps, vehicle, limits, search, budget,
                                prediction_envelopes, clock=None, geometry_cache=None,
-                               source_lane_id=None, fixed_goal_pose=None):
+                               source_lane_id=None, fixed_goal_pose=None,
+                               allow_target_lane_continuation=False):
     """Use formal current perception; preserve original Sensor age/deadlines.
 
     Per-object PredictionEnvelope values are explicit and cover the original
@@ -387,11 +413,16 @@ def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_i
     An active caller retains its original source and frozen goal. The refreshed
     original crossing direction is required after SDK current-lane changes;
     neither reverse permission nor a newly advancing endpoint substitutes.
+    An explicit active-intent consumer may allow current-target continuation:
+    the actual whole body and every remaining path interval must fit the
+    current target lane. A lane-ID switch alone does not meet this condition.
     """
     clock = clock or time.monotonic
     try:
         current_lane_id=perception.lane.lane_id
         source_lane_id=current_lane_id if source_lane_id is None else source_lane_id
+        _require(type(allow_target_lane_continuation) is bool,'TARGET_CONTINUATION_FLAG_INVALID')
+        _require(isinstance(source_lane_id,str) and bool(source_lane_id),'ORIGINAL_SOURCE_LANE_INVALID')
         _require(all(number(v) for v in (perception.ego.vx,perception.ego.vy,perception.ego.speed))
                  and not opposes_direction(perception.ego.vx,perception.ego.vy,
                                             perception.ego.heading,perception.ego.speed),
@@ -399,13 +430,16 @@ def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_i
         _require(target_lane_id != source_lane_id, 'TARGET_ALREADY_CURRENT_LANE')
         _require(current_lane_id==source_lane_id or fixed_goal_pose is not None,
                  'FROZEN_LANE_CHANGE_GOAL_REQUIRED')
-        scene = read_maneuver_scene(perception, (source_lane_id, target_lane_id), clock, geometry_cache,source_lane_id)
+        current_target_only=allow_target_lane_continuation and current_lane_id==target_lane_id
+        scene = (read_maneuver_scene(perception,(target_lane_id,),clock,geometry_cache)
+                 if current_target_only else read_maneuver_scene(perception,
+                     (source_lane_id,target_lane_id),clock,geometry_cache,source_lane_id))
         now = clock()
         predictions = _source_predictions(scene['objects'],prediction_envelopes,now)
         facts = ManeuverFacts(perception, clock)
         target = next(v for v in scene['roads'] if v['lane_id']==target_lane_id)
-        target_region = CorridorRegion([target['polygon']])
-        if geometry_cache is not None:
+        target_region = scene['corridor'] if current_target_only else CorridorRegion([target['polygon']])
+        if geometry_cache is not None and not current_target_only:
             _require(geometry_cache.max_entries>=4, 'LANE_CHANGE_CACHE_NEEDS_FOUR_ENTRIES')
             scope = (perception.case_id,perception.task_id,perception.scene_id,scene['map_digest'])
             target_region = geometry_cache.region(scope,('target_body',target_lane_id),[target['polygon']])
@@ -415,17 +449,37 @@ def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_i
         # injected replay clocks may have a different origin. No renewal.
         effective = ValidationBudget(budget.max_checks, budget.max_depth, budget.min_interval_s,
             min(budget.deadline_monotonic_s, time.monotonic()+scene['source_valid_until_s']-clock()))
-        result = generate_lane_change((perception.ego.x, perception.ego.y, perception.ego.heading),
+        generator=_generate_lane_connector if current_target_only else generate_lane_change
+        options={'current_target_only':True} if current_target_only else {}
+        result = generator((perception.ego.x, perception.ego.y, perception.ego.heading),
             perception.ego.speed, initial_curvature_m_inv, target['center_line'], speed_cap_mps,
-            vehicle, limits, scene['legal_crossing_corridor'], scene['coverage'], predictions, search, effective,
-            target_region,fixed_goal_pose)
+            vehicle, limits, target_region if current_target_only else scene['legal_crossing_corridor'],
+            scene['coverage'], predictions, search, effective,target_region,fixed_goal_pose,**options)
         facts.check_current(True)
         _require(perception.lane.lane_id==current_lane_id and facts.map_digest()==scene['map_digest'],
                  'LANE_CHANGE_SOURCE_IDENTITY_CHANGED_DURING_SEARCH')
         _require(clock() < scene['source_valid_until_s'], 'LANE_CHANGE_SOURCE_EXPIRED_DURING_SEARCH')
+        if current_target_only and result['reason_code']=='CURRENT_TARGET_BODY_OUTSIDE':
+            # The SDK reference point may already be in B while the rear or
+            # a corner is still in A. Only that geometric outcome permits
+            # retrying the original crossing, with the already spent budget
+            # deducted and the current-target deadline still binding.
+            remaining=effective.max_checks-result['checks']
+            if remaining<=0:
+                raise _Failure('BUDGET_EXHAUSTED','inconclusive')
+            fallback=ValidationBudget(remaining,effective.max_depth,effective.min_interval_s,
+                                      effective.deadline_monotonic_s)
+            crossing=plan_lane_change_candidate(perception,target_lane_id,initial_curvature_m_inv,
+                speed_cap_mps,vehicle,limits,search,fallback,prediction_envelopes,clock,geometry_cache,
+                source_lane_id,fixed_goal_pose)
+            crossing['checks']=crossing.get('checks',0)+result['checks']
+            crossing['current_body_report']=result['current_body_report']
+            return crossing
         result.update(target_lane_id=target_lane_id, source_lane_id=source_lane_id,
                       frame_id=perception.frame_id, source_valid_until_s=scene['source_valid_until_s'],
                       nominal_start_time_s=now, map_digest=scene['map_digest'])
+        if not current_target_only:
+            result['crossing_side']=scene['crossings'][0]['side']
         return result
     except (_Failure, ValueError, TypeError, AttributeError, KeyError, OverflowError) as error:
         return dict(status=error.status if isinstance(error, _Failure) else 'invalid',

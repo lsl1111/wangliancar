@@ -73,11 +73,13 @@ class LaneChangePolicy(object):
     def _identity(candidate):
         return candidate.source_lane_id,candidate.lane_id,candidate.side,candidate.map_digest
 
-    def _body_inside(self,pose,candidate):
+    def _body_inside(self,pose,candidate,require_alignment=True):
         projection=project_polyline(candidate.center_line,pose.x,pose.y)
         corners=vehicle_footprint(pose,self.front_m,self.rear_m,self.half_width_m)
         return (projection_within_polyline(projection,len(candidate.center_line))
-                and abs(normalize_angle(pose.body_heading_rad-projection['heading']))<=.15
+                and (abs(normalize_angle(pose.body_heading_rad-projection['heading']))<=.15
+                     if require_alignment else abs(normalize_angle(
+                         pose.body_heading_rad-projection['heading']))<math.pi/2)
                 and all(projection_within_polyline(project_polyline(candidate.center_line,*p),
                                                    len(candidate.center_line)) for p in corners)
                 and corridor_contains(corners,candidate.left_boundary,candidate.right_boundary))
@@ -92,10 +94,12 @@ class LaneChangePolicy(object):
         if candidate.width_m<2*self.half_width_m:
             return False,'TARGET_LANE_TOO_NARROW'
         actual=GoalPose(frame.ego_x,frame.ego_y,frame.ego_heading)
-        if continuing and candidate.is_current_lane and self._body_inside(actual,candidate):
+        if continuing and candidate.is_current_lane and self._body_inside(actual,candidate,require_alignment=False):
             # Completing a crossing does not require permission to start a
             # second crossing. Current occupancy still constrains the body;
-            # future path safety remains the planner's independent obligation.
+            # Future path safety remains the planner's independent obligation.
+            # The body may still need to align inside B; completion below
+            # retains its separate stricter heading/stability requirement.
             body=vehicle_footprint(actual,self.front_m,self.rear_m,self.half_width_m)
             age=candidate.object_age_s
             for obj in candidate.objects:
