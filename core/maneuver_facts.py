@@ -12,6 +12,7 @@ from core.behavior_contract import require as _require
 from core.validation import number
 from core.region_geometry import convex_polygon, inside, outline_contains_point
 from core.boundary_lineage import native_points3,decode_position,exact_point
+from core.visibility_query import VisibilityQuery
 
 
 def _points(raw, dimensions, minimum=2, maximum=20000):
@@ -22,11 +23,13 @@ def _points(raw, dimensions, minimum=2, maximum=20000):
 
 
 class ManeuverFacts(object):
-    def __init__(self, perception, clock=None):
+    def __init__(self, perception, clock=None,visibility_max_checks=100000):
         self.p, self.clock = perception, clock or time.monotonic
         _require(isinstance(perception, Perception), 'MANEUVER_PERCEPTION_UNAVAILABLE')
         self.env = perception.maneuver_environment
         self.scope = (perception.case_id, perception.task_id, perception.scene_id, perception.frame_id)
+        self._visibility=None
+        self.visibility_max_checks=visibility_max_checks
         self._fresh()
 
     def _fresh(self, dynamic=False):
@@ -156,6 +159,15 @@ class ManeuverFacts(object):
         self._fresh(True)
         return result
 
+    def _covered_region(self,outline,views,left=None,right=None):
+        self._fresh(True)
+        if self._visibility is None:
+            self._visibility=VisibilityQuery(self.p.target_source,self.p.targets_frame_id,
+                self.env.dynamic_observed_at_s,self.env.dynamic_valid_until,self.clock,self.visibility_max_checks)
+        result=self._visibility.contains(outline,views,left,right)
+        self._fresh(True)
+        return result
+
     def road(self, lane_id, require_coverage=True):
         digest = self.map_digest()
         _require(isinstance(lane_id, str) and bool(lane_id) and isinstance(self.env.road_regions, list)
@@ -182,8 +194,9 @@ class ManeuverFacts(object):
             self._evidence(road.get('evidence'), 'verified_fusion', True)
             _require(road.get('coverage_verified') is True, 'MANEUVER_ROAD_COVERAGE_UNKNOWN')
             raw = [p for line in geometry.values() for p in line]
-            views = [v for v in self.coverage(raw) if all(inside(p[:2], v['polygon']) for p in raw)]
-            _require(bool(views), 'MANEUVER_ROAD_COVERAGE_UNKNOWN')
+            views = self.coverage(raw)
+            _require(self._covered_region(polygon,views,[p[:2] for p in geometry['left_boundary']],
+                [p[:2] for p in geometry['right_boundary']]), 'MANEUVER_ROAD_COVERAGE_UNKNOWN')
         result = dict(geometry, lane_id=lane_id, polygon=polygon, map_digest=digest,
                       geometry_model=road['geometry_model'], coverage=views,
                       occupancy=road.get('occupancy', 'unknown'), object_ids=copy.deepcopy(road.get('object_ids', [])),
@@ -245,8 +258,8 @@ class ManeuverFacts(object):
         _require(value.get('occupancy')=='empty' and value.get('occupancy_verified') is True
                  and value.get('coverage_verified') is True and value.get('blocking_object_ids')==[],
                  'MANEUVER_PARKING_OCCUPIED_OR_UNOBSERVED')
-        views=[v for v in self.coverage(knots) if all(inside(p[:2],v['polygon']) for p in knots)]
-        _require(bool(views),'MANEUVER_PARKING_COVERAGE_UNKNOWN')
+        views=self.coverage(knots)
+        _require(self._covered_region(boundary,views),'MANEUVER_PARKING_COVERAGE_UNKNOWN')
         self._fresh(True)
         return dict(id=space_id,boundary_knots=knots,entrance_edge=entrance,boundary=boundary,
                     map_heading_rad=raw['heading'] if raw['heading_valid'] else None,

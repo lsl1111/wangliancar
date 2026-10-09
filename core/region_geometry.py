@@ -235,7 +235,7 @@ def outline_contains_path(points,outline,max_checks=100000):
     return outline_contains_point(((a[0]+b[0])/2.,(a[1]+b[1])/2.),outline)
 
 
-def strip_cells(left,right):
+def strip_cells(left,right,check_step=None):
     """Oriented zipper mesh of a validated simple lane strip in linear work.
 
     Every source border vertex participates; interior edges cancel pairwise.
@@ -249,15 +249,19 @@ def strip_cells(left,right):
     lengths=[]
     for boundary in (left,right):
         values=[0.]
-        for a,b in zip(boundary,boundary[1:]): values.append(values[-1]+math.hypot(b[0]-a[0],b[1]-a[1]))
+        for a,b in zip(boundary,boundary[1:]):
+            if check_step is not None: check_step()
+            values.append(values[-1]+math.hypot(b[0]-a[0],b[1]-a[1]))
         if values[-1]<=1e-8: raise ValueError("degenerate strip boundary")
         lengths.append([v/values[-1] for v in values])
     i,j,cells=0,0,[]
     while i+1<len(left) or j+1<len(right):
+        if check_step is not None: check_step()
         advance_left=j+1==len(right) or (i+1<len(left) and lengths[0][i+1]<=lengths[1][j+1])
         options=[advance_left,not advance_left]
         selected=None
         for option in options:
+            if check_step is not None: check_step()
             if option and i+1<len(left): triangle=[left[i],left[i+1],right[j]]
             elif not option and j+1<len(right): triangle=[left[i],right[j+1],right[j]]
             else: continue

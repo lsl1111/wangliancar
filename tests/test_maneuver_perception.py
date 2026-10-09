@@ -135,7 +135,7 @@ class ManeuverPerceptionTests(unittest.TestCase):
         model["profiles"][0]["body_region_m"] = [[-2.,-2.],[2.,-2.],[2.,2.],[-2.,2.]]
         self.assertEqual("unknown",self.build(p,model).parking_spaces[0]["occupancy"])
 
-    def test_disjoint_profiles_are_not_an_invented_fused_clear_region(self):
+    def test_overlapping_profiles_of_one_original_sensor_packet_cover_the_whole_bay(self):
         p = perception()
         model = profile(p)
         first = model["profiles"][0]
@@ -143,7 +143,9 @@ class ManeuverPerceptionTests(unittest.TestCase):
         second = copy.deepcopy(first)
         second["body_region_m"] = [[12.,2.],[16.,2.],[16.,7.],[12.,7.]]
         model["profiles"].append(second)
-        self.assertEqual("unknown",self.build(p,model).parking_spaces[0]["occupancy"])
+        env=self.build(p,model)
+        self.assertEqual("empty",env.parking_spaces[0]["occupancy"])
+        self.assertEqual('COVERAGE_COMPLETE_PACKET_UNION',env.status['coverage']['query_reason'])
 
     def test_task_case_vehicle_sensor_and_installation_must_match(self):
         p = perception()

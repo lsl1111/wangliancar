@@ -12,6 +12,7 @@ from core.interfaces import ManeuverEnvironment
 from core.region_geometry import (convex_polygon, inside, intersects, hull, rectangle,
                                   circle_intersects,intersect_convex)
 from core.validation import number
+from core.visibility_query import VisibilityQuery
 from perception.sensor_visibility import SensorVisibility
 from perception.sensor_pose_history import SensorPoseHistory
 from perception.traffic_geometry import signal_reference, stop_line_position
@@ -53,10 +54,8 @@ def _touches(obj, region, horizon=0.0):
     return intersects(body,region)
 
 
-def _covered(region, coverage):
-    # One matched source must cover the full region; do not invent a union or
-    # fuse incompatible packets simply because several sensors are configured.
-    return any(all(inside(p,record["polygon"]) for p in region) for record in coverage)
+def _covered(region,coverage,query,left=None,right=None):
+    return query is not None and query.contains(region,coverage,left,right)
 
 
 def _same_plane(raw, z):
@@ -93,12 +92,13 @@ def _evidence(environment, source, source_kind, verified=False):
 
 
 class ManeuverEnvironmentBuilder(object):
-    def __init__(self, route_manager, config=None, clock=None):
+    def __init__(self, route_manager, config=None, clock=None,visibility_max_checks=100000):
         self.route_manager,self.clock = route_manager,clock or time.monotonic
         self.visibility = SensorVisibility(getattr(config,"sensor_visibility_file",""))
         self.vehicle_id = getattr(config,"vehicle_id","0")
         self.sensor_timeout_ms = getattr(config,"sensor_timeout_ms",500)
         self.pose_history = SensorPoseHistory(self.vehicle_id,self.sensor_timeout_ms)
+        self.visibility_max_checks=visibility_max_checks
 
     def build(self, perception):
         env = ManeuverEnvironment().bind(perception)
@@ -154,6 +154,13 @@ class ManeuverEnvironmentBuilder(object):
                 record["pose_source"] = pose_reason
             env.coverage_regions = coverage
         env.status["coverage"] = dict(verified=bool(coverage),reason=coverage_reason,pose_reason=pose_reason)
+        query=None
+        if coverage:
+            try:
+                query=VisibilityQuery(perception.target_source,perception.targets_frame_id,
+                    env.dynamic_observed_at_s,env.dynamic_valid_until,self.clock,self.visibility_max_checks)
+            except ValueError as error:
+                env.status['coverage']['query_reason']=str(error)
         try:
             if hasattr(self.route_manager,"read_neighbor_lanes"):
                 env.neighbor_lanes = self.route_manager.read_neighbor_lanes(perception.ego,perception.lane)
@@ -161,7 +168,9 @@ class ManeuverEnvironmentBuilder(object):
                 outline = lane["left_boundary"]+list(reversed(lane["right_boundary"]))
                 raw=lane["center_line"]+lane["left_boundary"]+lane["right_boundary"]
                 verified = bool(lane["geometry_valid"] and outline and complete
-                    and _covered(outline,_plane_coverage(raw,coverage)) and _same_plane(raw,perception.ego.z))
+                    and _covered([p[:2] for p in outline],_plane_coverage(raw,coverage),query,
+                        [p[:2] for p in lane['left_boundary']],[p[:2] for p in lane['right_boundary']])
+                    and _same_plane(raw,perception.ego.z))
                 lane["dynamic_coverage_verified"] = verified
                 lane["objects"] = copy.deepcopy(env.objects)
                 lane["evidence"] = _evidence(env,perception.target_source if verified else "hdmap",
@@ -189,12 +198,28 @@ class ManeuverEnvironmentBuilder(object):
                 env.map_semantics = dict(verified=False,reason="MAP_SEMANTICS_QUERY:"+type(exc).__name__)
                 env.junctions = []
                 env.road_regions = []
-        self._roads(perception,env,complete,coverage)
-        self._parking(perception,env,complete,coverage)
-        self._crossings(perception,env,complete,coverage)
+        self._roads(perception,env,complete,coverage,query)
+        self._parking(perception,env,complete,coverage,query)
+        self._crossings(perception,env,complete,coverage,query)
+        if query is not None:
+            env.status['coverage'].update(query_checks=query.checks,query_reason=query.reason)
+        # A lengthy map/geometry query must not publish renewed clear regions.
+        finished_at=self.clock()
+        if coverage and (not number(finished_at)
+                or not env.dynamic_observed_at_s<=finished_at<env.dynamic_valid_until):
+            env.coverage_regions=[]; env.free_regions=[]
+            env.status['coverage'].update(verified=False,reason='source_expired_during_environment_build')
+            for item in env.neighbor_lanes:
+                item['dynamic_coverage_verified']=False; item['local_coverage_verified']=False
+                if isinstance(item.get('evidence'),dict): item['evidence']['coverage_verified']=False
+            for item in env.road_regions+env.parking_spaces+env.crossing_regions:
+                item['coverage_verified']=False
+                if item.get('occupancy') in ('clear','empty'): item['occupancy']='unknown'
+                if 'occupancy_verified' in item and item.get('occupancy')=='unknown': item['occupancy_verified']=False
+                if isinstance(item.get('evidence'),dict): item['evidence']['coverage_verified']=False
         return env
 
-    def _roads(self,p,env,complete,coverage):
+    def _roads(self,p,env,complete,coverage,query):
         """Only intersect already verified road cells with actual visibility.
 
         A clear cell is current occupancy evidence, not crossing legality or a
@@ -213,7 +238,8 @@ class ManeuverEnvironmentBuilder(object):
             planar = _same_plane(raw,p.ego.z)
             region_coverage=_plane_coverage(raw,coverage)
             views=[(v["polygon"],_bounds(v["polygon"])) for v in region_coverage]
-            verified = bool(valid and complete and planar and polygon and _covered(polygon,region_coverage))
+            verified = bool(valid and complete and planar and polygon and _covered(polygon,region_coverage,query,
+                [v[:2] for v in region['left_boundary']],[v[:2] for v in region['right_boundary']]))
             hits=set()
             if valid:
                 for index,cell in enumerate(cells):
@@ -245,7 +271,7 @@ class ManeuverEnvironmentBuilder(object):
                     neighbor["local_coverage_verified"] = verified
                     neighbor["local_drivable_verified"] = region["drivable_verified"]
 
-    def _parking(self,p,env,complete,coverage):
+    def _parking(self,p,env,complete,coverage,query):
         complete = complete and self.clock()<env.dynamic_valid_until
         env.status["parking_spaces"] = "observed" if p.parking_spaces_valid else "map_geometry_unusable"
         if not p.parking_spaces_valid:
@@ -258,7 +284,7 @@ class ManeuverEnvironmentBuilder(object):
                 region = convex_polygon([tuple(v[:2]) for v in record["boundary_knots"]])
                 item.update(boundary=region,geometry_valid=True)
                 hits = [obj["id"] for obj in env.objects if _touches(obj,region)]
-                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage)) and _same_plane(record["boundary_knots"],p.ego.z)
+                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage),query) and _same_plane(record["boundary_knots"],p.ego.z)
                 # Observing an obstacle proves occupancy without claiming the
                 # remainder of the space was observed. Empty needs full coverage.
                 if hits:
@@ -276,7 +302,7 @@ class ManeuverEnvironmentBuilder(object):
                 item["reason"] = "parking_geometry_invalid:"+type(exc).__name__
             env.parking_spaces.append(item)
 
-    def _crossings(self,p,env,complete,coverage):
+    def _crossings(self,p,env,complete,coverage,query):
         complete = complete and self.clock()<env.dynamic_valid_until
         env.status["crossing_regions"] = dict(geometry_scope="signal_associated_lanes",
             coverage_complete=False,right_of_way="UNKNOWN",exit_geometry="unavailable")
@@ -298,7 +324,7 @@ class ManeuverEnvironmentBuilder(object):
                 item.update(polygon=region,geometry_valid=True)
                 item["object_ids"] = [o["id"] for o in env.objects if _touches(o,region)]
                 item["predicted_object_ids"] = [o["id"] for o in env.objects if _touches(o,region,3.)]
-                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage)) and _same_plane(record["boundary_knots"],p.ego.z)
+                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage),query) and _same_plane(record["boundary_knots"],p.ego.z)
                 item["coverage_verified"] = verified
                 item["occupancy"] = ("occupied" if item["object_ids"] else "clear" if verified else "unknown")
                 item["evidence"] = _evidence(env,p.target_source,"verified_fusion",verified)

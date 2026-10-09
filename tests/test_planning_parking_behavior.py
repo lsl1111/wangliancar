@@ -23,7 +23,7 @@ from tests.test_planning_candidate_validation import vehicle,limits,budget
 from tests.test_planning_parking_generator import search
 from tests.test_control_maneuvers import BidirectionalPlant
 from tests.control_benchmark import vehicle as control_vehicle
-from tests.test_maneuver_perception import target
+from tests.test_maneuver_perception import target,profile
 
 
 class ParkingFixedEntryTests(unittest.TestCase):
@@ -378,6 +378,15 @@ class ParkingFixedEntryTests(unittest.TestCase):
 
     def test_formal_decision_fixed_entry_control_transport_complete_original_stages(self):
         p=self.f.p; plant=BidirectionalPlant(x=p.ego.x,y=p.ego.y,heading=p.ego.heading,lag=.3)
+        # One original packet has two explicitly verified convex view pieces.
+        # Their true union is the old field; the rear axle lies on their seam.
+        # Every stage must consume both without inventing a fused Sensor source.
+        model=profile(p); first=model['profiles'][0]
+        first['body_region_m']=[[-100.,-20.],[0.,-20.],[0.,20.],[-100.,20.]]
+        second=copy.deepcopy(first)
+        second['body_region_m']=[[0.,-20.],[150.,-20.],[150.,20.],[0.,20.]]
+        model['profiles'].append(second); self.f.write_profile(model); self.f.build()
+        self.assertEqual(2,len(p.maneuver_environment.coverage_regions))
         seen=[]; identity=None; parked_at=None; exited_at=None; completed=False
         for tick in range(3000):
             result=self.evaluate()
