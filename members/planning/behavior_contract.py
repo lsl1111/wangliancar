@@ -72,6 +72,9 @@ def _strings(value, reason):
 
 
 def _goal(request, current_lane_id, runtime_stop=False):
+    source=request.get('source_lane_id')
+    _require(source is None or _text(source),'SOURCE_LANE_INVALID')
+    _require(source is None,'UNSUPPORTED_SOURCE_LANE')
     lane, parking, pose = (request[key] for key in ("target_lane_id", "parking_space_id", "goal_pose"))
     _require(lane is None or _text(lane), "TARGET_LANE_INVALID")
     _require(parking is None or type(parking) is int, "PARKING_TARGET_INVALID")
@@ -155,7 +158,8 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                  and 0 <= active_identity["source_frame_id"] <= frame_id
                  and _finite(active_identity["issued_at_s"])
                  and active_identity["issued_at_s"] <= now_s, "ACTIVE_IDENTITY_INVALID")
-        _keys(request, _REQUEST_KEYS, "REQUEST_SCHEMA")
+        _require(isinstance(request,dict) and set(request) in
+                 (_REQUEST_KEYS,_REQUEST_KEYS|{'source_lane_id'}),'REQUEST_SCHEMA')
         _require(type(runtime_stop) is bool and request["contract_version"] == CONTRACT_VERSION
                  and request["interface_status"] == ("runtime_connected" if runtime_stop else "proposal_not_runtime_connected"), "REQUEST_VERSION")
         _context(request["task_context"], "REQUEST_CONTEXT_INVALID")

@@ -96,13 +96,18 @@ class GoalPose(object):
 class BehaviorGoal(object):
     __slots__ = ("target_lane_id", "parking_space_id", "goal_pose", "motion_direction",
                  "speed_cap_mps", "stop_distance_m", "precision_stop",
-                 "minimum_standstill_duration_s", "parking_brake_at_stop", "light_intent", "stop_obligation_id")
+                 "minimum_standstill_duration_s", "parking_brake_at_stop", "light_intent", "stop_obligation_id", "source_lane_id")
 
     def __init__(self, target_lane_id=None, parking_space_id=None, goal_pose=None,
                  motion_direction=1, speed_cap_mps=0.0, stop_distance_m=-1.0,
                  precision_stop=False, minimum_standstill_duration_s=0.0,
-                 parking_brake_at_stop=False, light_intent=None, stop_obligation_id=None):
+                 parking_brake_at_stop=False, light_intent=None, stop_obligation_id=None,
+                 source_lane_id=None):
         require(target_lane_id is None or isinstance(target_lane_id, str), "invalid target lane")
+        require(source_lane_id is None or isinstance(source_lane_id,str) and bool(source_lane_id),
+                "invalid original source lane")
+        require(source_lane_id is None or isinstance(target_lane_id,str) and bool(target_lane_id)
+                and source_lane_id!=target_lane_id,'original source requires a distinct target lane')
         require(parking_space_id is None or type(parking_space_id) is int, "invalid parking ID")
         require(goal_pose is None or isinstance(goal_pose, GoalPose), "invalid goal pose type")
         require(type(motion_direction) is int and motion_direction in (-1, 1), "invalid direction")
@@ -113,6 +118,7 @@ class BehaviorGoal(object):
         require(type(precision_stop) is bool and type(parking_brake_at_stop) is bool,
                 "invalid stop flags")
         self.target_lane_id, self.parking_space_id, self.goal_pose = target_lane_id, parking_space_id, goal_pose
+        self.source_lane_id=source_lane_id
         self.motion_direction, self.speed_cap_mps = motion_direction, speed_cap_mps
         self.stop_distance_m, self.precision_stop = stop_distance_m, precision_stop
         self.minimum_standstill_duration_s = minimum_standstill_duration_s
@@ -123,13 +129,17 @@ class BehaviorGoal(object):
         require(isinstance(self.light_intent, LightIntent), "invalid lights type")
 
     def to_dict(self):
-        return dict(target_lane_id=self.target_lane_id, parking_space_id=self.parking_space_id,
+        result=dict(target_lane_id=self.target_lane_id, parking_space_id=self.parking_space_id,
                     goal_pose=None if self.goal_pose is None else self.goal_pose.to_dict(),
                     motion_direction=self.motion_direction, speed_cap_mps=self.speed_cap_mps,
                     stop_distance_m=self.stop_distance_m, precision_stop=self.precision_stop,
                     minimum_standstill_duration_s=self.minimum_standstill_duration_s,
                     parking_brake_at_stop=self.parking_brake_at_stop,
                     light_intent=self.light_intent.to_dict(), stop_obligation_id=self.stop_obligation_id)
+        # Optional v1 extension: old forward/stop payloads keep their schema.
+        if self.source_lane_id is not None:
+            result['source_lane_id']=self.source_lane_id
+        return result
 
 
 class BehaviorRequest(object):
