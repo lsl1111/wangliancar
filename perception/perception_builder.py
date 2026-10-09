@@ -10,6 +10,7 @@ from core.scene_requirements import requires_targets
 from simone_platform.case_resolver import resolve_scene_id
 from perception.map_semantics import speed_limit_observations
 from perception.traffic_signals import build_traffic
+from perception.maneuver_environment import ManeuverEnvironmentBuilder
 
 
 def _finite_data(value):
@@ -31,6 +32,7 @@ class PerceptionBuilder(object):
         self.case_id = ""
         self.task_id = ""
         self.scene_id = int(scene_override)
+        self.maneuver_builder = ManeuverEnvironmentBuilder(route_manager,getattr(adapter,"config",None))
 
     def update_case_info(self):
         info = self.adapter.get_case_info()
@@ -236,6 +238,13 @@ class PerceptionBuilder(object):
         if result.ego.valid and result.ego.age_ms >= 0:
             result.valid_until = min(result.valid_until, time.monotonic() +
                                      max(0, timeout - result.ego.age_ms) / 1000.0)
+        try:
+            result.maneuver_environment = self.maneuver_builder.build(result)
+        except Exception as exc:
+            # Optional new environment must not terminate the established
+            # GPS/target/signal chain, nor masquerade as valid on failure.
+            result.maneuver_environment.bind(result)
+            result.maneuver_environment.errors.append("MANEUVER_ENVIRONMENT:"+type(exc).__name__)
         return result
 
     def _build_map_observations(self, result, raw):

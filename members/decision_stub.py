@@ -2,14 +2,14 @@
 
 from members.decision.engine import DecisionEngine
 
-DECISION_VERSION = "decision-behaviors-m1-on-v10"
+DECISION_VERSION = "decision-behaviors-runtime-stop-v1"
 _ENGINE = DecisionEngine()
 
 
-def reset_decision(settings=None):
+def reset_decision(settings=None,parking_inputs_provider=None):
     """Start a new runtime session without carrying prior blind-stop state."""
     global _ENGINE
-    _ENGINE = DecisionEngine(settings)
+    _ENGINE = DecisionEngine(settings,parking_inputs_provider=parking_inputs_provider)
 
 
 def decision_info():
@@ -25,7 +25,7 @@ def decision_settings():
 
 
 def decision_behavior_info():
-    """Diagnostics/proposals only; this is not an execution-feedback channel."""
+    """Diagnostic copy only; execution feedback uses the public channel."""
     return _ENGINE.behavior_diagnostics()
 
 

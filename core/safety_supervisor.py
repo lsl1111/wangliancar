@@ -15,6 +15,7 @@ from core.traffic_quality import signal_stop_requirement, signal_stop_bound
 from core.validation import current, number
 from core.target_semantics import mapped_traffic_light
 from core.route_obstacles import RouteContext, mapped_route_motion, route_footprint_relevant
+from core.geometry import opposes_direction
 
 
 class SafetyAssessment(object):
@@ -35,8 +36,11 @@ class SafetySupervisor(object):
     SimOne may reject repeated headers; the sender must report its receipt.
     """
 
-    def __init__(self, config, clock=None, planning_settings=None, decision_settings=None):
+    def __init__(self, config, clock=None, planning_settings=None, decision_settings=None,parking_guard=None):
         self.clock = clock or time.monotonic
+        if parking_guard is not None and not callable(parking_guard):
+            raise ValueError('invalid parking safety guard')
+        self.parking_guard=parking_guard
         self.repeat_fault_ms = max(1, int(getattr(config, "pipeline_timeout_ms", 200)))
         self.last_gps_ms = max(1, int(getattr(config, "sensor_timeout_ms", 500)))
         self.recovery_frames = max(1, int(getattr(config, "safety_recovery_frames", 3)))
@@ -222,13 +226,16 @@ class SafetySupervisor(object):
             self.last_good_at = now
 
         signal_fault = self._signal_guard(perception, decision, trajectory) if gps_ok else ''
+        parking = self._parking_assessment(perception,decision,trajectory,control) if gps_ok else None
         mode, reason = "normal", ""
         if not gps_ok:
             mode, reason = "fault_stop", "gps_invalid_or_expired"
         elif (getattr(perception.ego, "age_ms", -1) >= self.repeat_fault_ms
               or repeat_ms >= self.repeat_fault_ms):
             mode, reason = "fault_stop", "gps_frame_stalled"
-        elif self._imminent_collision(perception, self.collision_settings, self.route_settings):
+        elif parking is not None and parking.active:
+            mode,reason=parking.mode,parking.reason
+        elif parking is None and self._imminent_collision(perception, self.collision_settings, self.route_settings):
             mode, reason = "emergency_stop", "imminent_target_collision"
         elif not getattr(perception, "lane", None) or not perception.lane.valid:
             mode, reason = "controlled_stop", "lane_unavailable"
@@ -265,6 +272,28 @@ class SafetySupervisor(object):
         control = self._candidate(mode, reason, now,
                                   perception.valid_until if gps_ok else None)
         return SafetyAssessment(mode, reason, control)
+
+    def _parking_assessment(self,p,decision,trajectory,control):
+        request=getattr(decision,'behavior_request',None)
+        parking=isinstance(request,dict) and request.get('maneuver')=='PARK'
+        if parking:
+            if self.parking_guard is None:
+                return SafetyAssessment('controlled_stop','parking_monitor_unavailable')
+            try:
+                result=self.parking_guard(p,decision,trajectory,control)
+                if not isinstance(result,SafetyAssessment) or result.mode not in (
+                        'normal','controlled_stop','fault_stop','emergency_stop'):
+                    raise ValueError('invalid parking guard assessment')
+                return result
+            except Exception as error:
+                return SafetyAssessment('fault_stop','parking_monitor_failed:'+str(error))
+        if getattr(trajectory,'motion_direction',1)!=1:
+            return SafetyAssessment('fault_stop','reverse_maneuver_unverified')
+        if not all(number(v) for v in (p.ego.vx,p.ego.vy,p.ego.heading,p.ego.speed)):
+            return SafetyAssessment('fault_stop','actual_velocity_unavailable')
+        if opposes_direction(p.ego.vx,p.ego.vy,p.ego.heading,p.ego.speed):
+            return SafetyAssessment('emergency_stop','actual_motion_opposes_forward_path')
+        return None
 
     def _candidate(self, mode, reason, now, source_deadline):
         if mode == "normal" or self.last_good_header is None:
