@@ -29,8 +29,9 @@ def _link_frame(perception, output):
 
 
 class DecisionEngine(object):
-    def __init__(self, settings=None, clock=None):
+    def __init__(self, settings=None, clock=None,parking_inputs_provider=None):
         self._clock = clock or time.monotonic
+        self._parking_inputs_provider=parking_inputs_provider
         self.settings = (settings if settings is not None
                          else DecisionSettings.from_environment()).validate()
         self.reset()
@@ -40,7 +41,7 @@ class DecisionEngine(object):
         if hasattr(self, "_behavior"):
             self._behavior.reset()
         else:
-            self._behavior = BehaviorCoordinator(self.settings, self._clock)
+            self._behavior = BehaviorCoordinator(self.settings, self._clock,self._parking_inputs_provider)
         self._last_constraints = None
         self._blind_fault_count = 0
         self._blind_stop = False
@@ -86,15 +87,25 @@ class DecisionEngine(object):
             _link_frame(perception, output)
             distinct = self._observe_frame(perception)
             self._last_constraints = None
-            self._arbitrate(perception, output, distinct)
+            if protocol.perception_usable(perception) and self._behavior.parking.prepare(perception,self._clock()):
+                self._behavior.parking.provisional(perception,output)
+            else:
+                if not protocol.perception_usable(perception): self._behavior.parking.suspend()
+                self._arbitrate(perception, output, distinct)
             if output.valid and protocol.perception_usable(perception):
                 try:
                     self._behavior.observe_legacy(perception, output, self._last_constraints, self._clock())
+                    self._behavior.apply_parking(perception,output)
                 except (ValueError, TypeError, AttributeError, KeyError) as exc:
                     self._behavior.diagnostic_error(output.frame_id, type(exc).__name__)
-                    if self._behavior.execution_pending():
+                    if self._behavior.execution_pending() or self._behavior.parking.claimed:
+                        self._behavior.parking.suspend()
                         output.behavior_request,output.behavior_active_identity = None,None
                         self._protect(output,perception.ego.speed,"BEHAVIOR_CHANNEL_FAILURE:"+type(exc).__name__)
+            elif self._behavior.parking.claimed:
+                self._behavior.parking.suspend()
+                if output.mode not in (DecisionMode.STOP,DecisionMode.EMERGENCY_BRAKE):
+                    self._behavior.parking.hold(perception,output)
         except Exception as exc:
             output.valid = False
             output.mode = DecisionMode.STOP

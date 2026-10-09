@@ -12,12 +12,15 @@ from core.parking_mission import ParkingMission
 from core.maneuver_facts import ManeuverFacts
 from members.decision.behaviors.observations import Evidence as LegacyEvidence
 from members.decision.behaviors.parking_environment import ParkingMission as LegacyMission
+from members.decision.behaviors.parking_runtime import ParkingDecisionInputs
+from members.decision.engine import DecisionEngine
+from members.decision.settings import DecisionSettings
 from members.planning.parking_behavior import ParkingPlanningInputs
 from members.planning.lane_planner import PlannerSettings
 from members.planning.maneuver_scene import ManeuverGeometryCache
 from members.planning.lane_change_generator import PredictionEnvelope
 from members.control.controller import ControlEngine
-from members import planning_stub,control_stub
+from members import decision_stub,planning_stub,control_stub
 from tests import test_decision_parking_environment as fixture
 from tests.test_planning_candidate_validation import vehicle,limits,budget
 from tests.test_planning_parking_generator import search
@@ -64,6 +67,12 @@ class ParkingFixedEntryTests(unittest.TestCase):
             budget(max_checks=1000000),{},geometry_cache=self.cache)
         for key,item in self.input_changes.items(): setattr(value,key,item)
         return value
+
+    def decision_inputs(self,p,context):
+        model=Evidence(context,p.frame_id,self.f.now,p.valid_until,usable=True,coverage_verified=True,
+                       source='synthetic-parking-model-snapshot',source_kind='task')
+        return ParkingDecisionInputs(model,self.h.mission(),'synthetic-parking-model-v1',
+                                     (3.9,.9,.9),.1,.1,1000000,(.15,.15,.05),1.)
 
     def advance(self,pose=None,speed=0.,direction=1):
         self.h.advance(pose,speed)
@@ -378,6 +387,10 @@ class ParkingFixedEntryTests(unittest.TestCase):
 
     def test_formal_decision_fixed_entry_control_transport_complete_original_stages(self):
         p=self.f.p; plant=BidirectionalPlant(x=p.ego.x,y=p.ego.y,heading=p.ego.heading,lag=.3)
+        decision_engine=DecisionEngine(DecisionSettings(front_offset_m=3.9,half_width_m=.9),
+                                      self.f.clock,self.decision_inputs)
+        manager=patch('members.decision_stub._ENGINE',decision_engine)
+        manager.start(); self.addCleanup(manager.stop)
         # One original packet has two explicitly verified convex view pieces.
         # Their true union is the old field; the rear axle lies on their seam.
         # Every stage must consume both without inventing a fused Sensor source.
@@ -389,19 +402,20 @@ class ParkingFixedEntryTests(unittest.TestCase):
         self.assertEqual(2,len(p.maneuver_environment.coverage_regions))
         seen=[]; identity=None; parked_at=None; exited_at=None; completed=False
         for tick in range(3000):
-            result=self.evaluate()
-            if result.request.status=='COMPLETED': completed=True; break
-            self.assertTrue(result.request.dispatch_allowed,(tick,result.phase,result.reason,plant.x,plant.y,plant.heading))
-            r=result.request
-            if identity is None: identity=r.intent_id
-            self.assertEqual(identity,r.intent_id)
-            if not seen or seen[-1]!=r.stage: seen.append(r.stage)
-            d=self.decision(r); t=planning_stub.plan(p,d)
-            self.assertTrue(t.valid,(tick,r.stage,plant.x,plant.y,plant.heading,plant.speed,self.curvature,t.errors))
+            d=decision_stub.decide(p); validate_output(d,DecisionTarget,p)
+            state=decision_stub.decision_behavior_info().get('parking',{})
+            if state.get('status')=='COMPLETED': completed=True; break
+            r=d.behavior_request
+            self.assertIsNotNone(r,(tick,state,d.reason,plant.x,plant.y,plant.heading))
+            if identity is None: identity=r['intent_id']
+            self.assertEqual(identity,r['intent_id'])
+            if not seen or seen[-1]!=r['stage']: seen.append(r['stage'])
+            t=planning_stub.plan(p,d)
+            self.assertTrue(t.valid,(tick,r['stage'],plant.x,plant.y,plant.heading,plant.speed,self.curvature,t.errors))
             c=control_stub.compute_control(p,t); self.assertTrue(c.valid,(tick,c.errors))
             self.transport.observe(p,d,t,c)
             if self.engine.standstill.anchor is not None and parked_at is None: parked_at=self.f.now
-            if r.stage=='EXIT' and c.throttle>0 and exited_at is None: exited_at=self.f.now
+            if r['stage']=='EXIT' and c.throttle>0 and exited_at is None: exited_at=self.f.now
             if parked_at is not None and self.f.now-parked_at<10.:
                 self.assertEqual(0.,c.throttle); self.assertTrue(c.handbrake)
             plant.step(c,.05,self.calibration)
@@ -413,6 +427,10 @@ class ParkingFixedEntryTests(unittest.TestCase):
         self.assertEqual(['APPROACH','POSITION','REVERSE_ENTRY','PARKED_DWELL','EXIT_PREPARE','EXIT'],seen)
         self.assertIsNotNone(parked_at); self.assertIsNotNone(exited_at)
         self.assertGreaterEqual(exited_at-parked_at,10.)
+        self.advance(GoalPose(plant.x,plant.y,plant.heading),plant.speed,plant.direction)
+        finished=decision_stub.decide(p)
+        self.assertIsNone(finished.behavior_request)
+        self.assertEqual('COMPLETED',decision_stub.decision_behavior_info()['parking']['status'])
 
 
 if __name__=='__main__': unittest.main()

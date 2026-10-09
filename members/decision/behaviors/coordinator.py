@@ -9,14 +9,16 @@ from members.decision.behaviors.session import BehaviorSession
 from core.behavior_channel import read_channel
 from core.maneuver_facts import ManeuverFacts
 from members.decision.behaviors.environment import lane_candidates
+from members.decision.behaviors.parking_runtime import ParkingRuntime
 from members.decision.behaviors.stop_policies import (
     SignalDwellPolicy, SignalStopObservation, BlockedRoadPolicy, BlockingObservation,
 )
 
 
 class BehaviorCoordinator(object):
-    def __init__(self, settings, clock=None):
+    def __init__(self, settings, clock=None,parking_inputs_provider=None):
         self.settings, self.clock = settings, clock or time.monotonic
+        self.parking_inputs_provider=parking_inputs_provider
         self._generation = 0
         self.reset()
 
@@ -30,6 +32,7 @@ class BehaviorCoordinator(object):
         self._generation += 1
         self.signal = SignalDwellPolicy(self.settings.signal_dwell_duration_s, self._session())
         self.blocked = BlockedRoadPolicy(self.settings.release_frames, self._session())
+        self.parking=ParkingRuntime(self.parking_inputs_provider,self._session,self.clock)
         self._signal_seen = set()
         self._runtime_context = None
         self._blockage_anchor = None
@@ -109,7 +112,7 @@ class BehaviorCoordinator(object):
             output.mode,output.target_speed,output.stop_distance = "STOP",0.,0.
             output.precision_stop = True
             output.reason = "SIGNAL_DWELL:"+signal.reason
-        if self.execution_pending() and (not connected or signal.request is None
+        if self.signal_pending() and (not connected or signal.request is None
                                          or not signal.request.dispatch_allowed):
             output.mode = "EMERGENCY_BRAKE" if perception.ego.speed>self.settings.standstill_speed else "STOP"
             output.target_speed,output.stop_distance = 0.,0.
@@ -153,10 +156,20 @@ class BehaviorCoordinator(object):
                             dependencies=([] if connected else ["R05_EXECUTION_FEEDBACK", "R07_BEHAVIOR_GOAL_CHANNEL",
                                           "DOWNSTREAM_CAPABILITIES"]))
 
-    def execution_pending(self):
+    def signal_pending(self):
         session = self.signal.session
         return bool(self._runtime_context is not None and session.intent_id
                     and session.status not in ("COMPLETED","CANCELLED"))
+
+    def execution_pending(self):
+        return self.signal_pending() or self.parking.pending()
+
+    def apply_parking(self,perception,output):
+        priority=(self.signal_pending() or signal_stop_requirement(perception) is not None
+                  or output.mode=='EMERGENCY_BRAKE' or output.behavior_request is not None)
+        self.parking.apply(perception,output,priority)
+        if self.parking.provider is not None or self.parking.pending():
+            self._latest['parking']=self.parking.snapshot()
 
     def diagnostic_error(self, frame_id, reason):
         self._latest = dict(interface_status="proposal_not_runtime_connected", frame_id=frame_id,
