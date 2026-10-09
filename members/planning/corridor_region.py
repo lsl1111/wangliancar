@@ -475,5 +475,6 @@ class CorridorRegion(object):
         prepared=_PreparedRegion.__new__(_PreparedRegion)
         prepared.polygons,prepared.roundoff=polygons,roundoff
         prepared.edge_count=len(segments)
+        prepared.segments=segments
         prepared.root=yield from _tree_steps(segments)
         return prepared

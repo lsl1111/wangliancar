@@ -9,6 +9,7 @@ from collections import OrderedDict
 from core.maneuver_facts import ManeuverFacts
 from core.behavior_contract import require
 from members.planning.candidate_validation import CorridorRegion
+from members.planning.crossing_corridor import CrossingCorridor
 
 
 class ManeuverGeometryCache(object):
@@ -23,15 +24,17 @@ class ManeuverGeometryCache(object):
     def clear(self):
         self.scope=None; self._entries.clear()
 
-    def region(self,scope,kind,polygons):
+    def region(self,scope,kind,polygons,source_descriptor=None):
         if scope!=self.scope:
             self.clear(); self.scope=scope
         frozen=tuple(tuple(tuple(p) for p in polygon) for polygon in polygons)
-        key=(kind,frozen)
+        key=(kind,frozen,source_descriptor)
         cached=self._entries.get(key)
         if (cached is None or cached.polygons!=frozen
-                or cached.preparation_max_checks!=self.preparation_max_checks):
-            self._entries[key]=CorridorRegion(frozen,preparation_max_checks=self.preparation_max_checks)
+                or cached.preparation_max_checks!=self.preparation_max_checks
+                or getattr(cached,'_source_descriptor',None)!=source_descriptor):
+            self._entries[key]=(CorridorRegion(frozen,preparation_max_checks=self.preparation_max_checks)
+                if source_descriptor is None else CrossingCorridor(frozen,source_descriptor,self.preparation_max_checks))
         self._entries.move_to_end(key)
         while len(self._entries)>self.max_entries: self._entries.popitem(last=False)
         return self._entries[key]
@@ -65,7 +68,23 @@ def read_maneuver_scene(perception, lane_ids, clock=None, geometry_cache=None):
         corridor=geometry_cache.region(scope,('road',tuple(lane_ids)),[v['polygon'] for v in roads])
         coverage=geometry_cache.region(scope,('visibility',tuple(lane_ids)),[v['polygon'] for v in views])
     facts.check_current(True)
+    legal=None
+    if len(lane_ids)==2 and perception.lane.lane_id in lane_ids and len(crossings)==1:
+        crossing=crossings[0]
+        borders=crossing['source_lane_boundaries']
+        descriptor=(tuple(borders['left']),tuple(borders['right']),crossing['side'],
+                    tuple((tuple(v[0]),tuple(v[-1])) for v in crossing['permitted_source_positions']))
+        polygons=[v['polygon'] for v in roads]
+        if geometry_cache is None:
+            legal=CrossingCorridor(tuple(tuple(tuple(p) for p in v) for v in polygons),descriptor,None)
+        else:
+            require(isinstance(geometry_cache,ManeuverGeometryCache),'MANEUVER_GEOMETRY_CACHE_INVALID')
+            require(geometry_cache.max_entries>=3,'MANEUVER_CROSSING_CACHE_NEEDS_THREE_ENTRIES')
+            scope=(perception.case_id,perception.task_id,perception.scene_id,facts.map_digest())
+            legal=geometry_cache.region(scope,('legal_crossing',tuple(lane_ids)),polygons,descriptor)
+    facts.check_current(True)
     return dict(roads=roads, corridor=corridor,
+                legal_crossing_corridor=legal,
                 coverage=coverage, coverage_records=views,
                 objects=objects, crossings=crossings, map_digest=facts.map_digest(),
                 source_observed_at_s=facts.env.dynamic_observed_at_s,

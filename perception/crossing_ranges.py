@@ -12,6 +12,7 @@ from collections import OrderedDict
 
 from core.geometry import project_polyline,projection_within_polyline
 from core.validation import number
+from core.boundary_lineage import native_points3,window_lineage_steps,densify_lineage_steps
 
 MAX_NATIVE_POINTS = 20000
 MAX_LOCAL_POINTS = 4096
@@ -24,21 +25,7 @@ Z_TOLERANCE_M = .1
 
 
 def points3(raw):
-    if not isinstance(raw,(tuple,list)) or not 2<=len(raw)<=MAX_NATIVE_POINTS:
-        raise ValueError("BOUNDARY_POINT_BUDGET_OR_MISSING")
-    result = []
-    for point in raw:
-        if not isinstance(point,(tuple,list)) or len(point)!=3 or not all(number(v) for v in point):
-            raise ValueError("BOUNDARY_COORDINATE_UNAVAILABLE")
-        value = tuple(float(v) for v in point)
-        if result and math.hypot(value[0]-result[-1][0],value[1]-result[-1][1])<=1e-6:
-            if abs(value[2]-result[-1][2])>1e-6:
-                raise ValueError("VERTICAL_BOUNDARY_SEGMENT_UNSUPPORTED")
-            continue
-        result.append(value)
-    if len(result)<2:
-        raise ValueError("BOUNDARY_DEGENERATE")
-    return tuple(result)
+    return native_points3(raw)
 
 
 def length3(points):
@@ -52,25 +39,24 @@ def window3(points,start,end):
     All original vertices within the window and linearly interpolated Z survive.
     """
     if not all(number(v) for v in (start,end)) or not start<end:
-        raise ValueError("BOUNDARY_WINDOW_INVALID")
-    result,along = [],0.
-    start = max(0.,start)
+        raise ValueError('BOUNDARY_WINDOW_INVALID')
+    result,along=[],0.
+    start=max(0.,start)
     for a,b in zip(points,points[1:]):
-        length = math.hypot(b[0]-a[0],b[1]-a[1])
-        low,high = max(start,along),min(end,along+length)
+        length=math.hypot(b[0]-a[0],b[1]-a[1])
+        if not number(length) or length<=0: raise ValueError('BOUNDARY_SEGMENT_INVALID')
+        low,high=max(start,along),min(end,along+length)
         if high>low+1e-8:
             for at in (low,high):
-                ratio = (at-along)/length
-                point = tuple(a[i]+ratio*(b[i]-a[i]) for i in range(3))
+                ratio=(at-along)/length
+                point=(a if at==along else b if at==along+length else
+                       tuple(a[i]+ratio*(b[i]-a[i]) for i in range(3)))
                 if not result or math.hypot(point[0]-result[-1][0],point[1]-result[-1][1])>1e-6:
                     result.append(point)
-            if len(result)>MAX_LOCAL_POINTS:
-                raise ValueError("LOCAL_BOUNDARY_POINT_BUDGET")
-        along += length
-        if along>=end:
-            break
-    if len(result)<2:
-        raise ValueError("BOUNDARY_WINDOW_EMPTY")
+            if len(result)>MAX_LOCAL_POINTS: raise ValueError('LOCAL_BOUNDARY_POINT_BUDGET')
+        along+=length
+        if along>=end: break
+    if len(result)<2: raise ValueError('BOUNDARY_WINDOW_EMPTY')
     return result
 
 
@@ -81,7 +67,7 @@ def densify3(points):
         if len(result)+steps>MAX_LOCAL_POINTS:
             raise ValueError("LOCAL_BOUNDARY_POINT_BUDGET")
         for index in range(1,steps+1):
-            result.append(tuple(a[i]+index/float(steps)*(b[i]-a[i]) for i in range(3)))
+            result.append(b if index==steps else tuple(a[i]+index/float(steps)*(b[i]-a[i]) for i in range(3)))
     return result
 
 
@@ -108,10 +94,12 @@ def _project3(points,point):
 
 
 class _Job(object):
-    def __init__(self,hdmap,identity,road,section,current,neighbor,native_side,intervals,ego,clock):
+    def __init__(self,hdmap,identity,road,section,current,neighbor,native_side,intervals,ego,clock,logical_side,source_boundaries):
         self.clock,self.hdmap = clock,hdmap
         self.current,self.neighbor,self.intervals = current,neighbor,copy.deepcopy(intervals)
         self.identity,self.road,self.section,self.native_side = identity,road,section,native_side
+        self.logical_side=logical_side
+        self.source_boundaries=source_boundaries
         projection = project_polyline(current,ego.x,ego.y)
         other = project_polyline(neighbor,ego.x,ego.y)
         if not projection_within_polyline(projection,len(current)) or not projection_within_polyline(other,len(neighbor)):
@@ -120,7 +108,7 @@ class _Job(object):
         # every frame and prevent it ever finishing. Later windows overlap.
         self.origin_s = projection["s"]
         self.window_start,self.window_end = max(0.,self.origin_s-25.),min(length3(current),self.origin_s+75.)
-        self.local = densify3(window3(current,self.window_start,self.window_end))
+        self.local,self.source_positions=None,None
         # Wider other-side window avoids confusing crop endpoints with an
         # actual mismatch. It is evidence for shape, not a permitted border.
         self.other = window3(neighbor,other["s"]-40.,other["s"]+90.)
@@ -128,6 +116,8 @@ class _Job(object):
         self.iterator = self._build()
 
     def _build(self):
+        clipped,positions=yield from window_lineage_steps(self.current,self.window_start,self.window_end)
+        self.local,self.source_positions=yield from densify_lineage_steps(self.current,clipped,positions,SAMPLE_SPACING_M)
         # Require bidirectional, ordered coincidence over the chosen window.
         prior = -1.
         for point in self.local:
@@ -177,7 +167,7 @@ class _Job(object):
         expected_sign = (1 if int(self.identity.split("_")[-1])<0 else -1)*(1 if self.road["rule"]=="RHT" else -1)
         matches_direction = bool(known_direction and deltas[0]*expected_sign>0)
         ranges,run = [],None
-        for a,b in zip(samples,samples[1:]):
+        for index,(a,b) in enumerate(zip(samples,samples[1:])):
             active = a[2]
             # Whole nominal border edges are included only within one matched
             # record, inset from transitions. No road-s interpolation or
@@ -187,12 +177,18 @@ class _Job(object):
                 and max(a[1],b[1])<=active["road_s_end_m"]-ROAD_S_GUARD_M)
             if permitted:
                 if run is None:
-                    run = dict(shared_boundary_world=[a[0]],road_s_samples_m=[a[1]],marking=copy.deepcopy(active))
+                    run = dict(shared_boundary_world=[a[0]],road_s_samples_m=[a[1]],marking=copy.deepcopy(active),
+                               source_positions=[self.source_positions[index]])
                     ranges.append(run)
                 run["shared_boundary_world"].append(b[0]); run["road_s_samples_m"].append(b[1])
+                run['source_positions'].append(self.source_positions[index+1])
             else:
                 run = None
         return dict(ranges=ranges,shared_boundary_world=list(self.local),
+                    source_lineage_model='native_edge_rational_v1',source_lane_id=self.identity,
+                    source_boundary_side=self.logical_side,source_boundary_world=list(self.current),
+                    source_lane_boundaries={k:list(v) for k,v in self.source_boundaries.items()},
+                    source_positions=list(self.source_positions),
                     road_s_samples_m=[v[1] for v in samples],boundary_arc_start_m=self.window_start,
                     boundary_arc_end_m=self.window_end,verification_model="sdk_piecewise_linear_boundary_v1",
                     complete_marking_coverage=all(v[2] is not None for v in samples[:-1]),
@@ -231,12 +227,14 @@ class CrossingRanges(object):
                 continue
             try:
                 side = item["side"]
-                current = points3(lane.left_boundary if side=="left" else lane.right_boundary)
+                source_boundaries=dict(left=points3(lane.left_boundary),right=points3(lane.right_boundary))
+                current = source_boundaries[side]
                 neighbor = points3(item["right_boundary"] if side=="left" else item["left_boundary"])
                 native_side = item.get("marking_observation",{}).get("native_side")
                 if native_side not in ("left","right"):
                     raise ValueError("NATIVE_SHARED_MARKING_SIDE_UNAVAILABLE")
-                key = (id(hdmap),digest,lane.lane_id,item["lane_id"],native_side,current,neighbor)
+                key = (id(hdmap),digest,lane.lane_id,item["lane_id"],native_side,
+                       source_boundaries['left'],source_boundaries['right'],neighbor)
                 job = self.jobs.get(key)
                 at = project_polyline(current,ego.x,ego.y)
                 if not projection_within_polyline(at,len(current)):
@@ -249,7 +247,7 @@ class CrossingRanges(object):
                     previous = job.result if job is not None and job.result is not None else (job.previous if job is not None else None)
                     road,section,unused = document.lane(lane.lane_id)
                     job = _Job(hdmap,lane.lane_id,road,section,current,neighbor,native_side,
-                               item["marking_intervals_road_s"],ego,self.clock)
+                               item["marking_intervals_road_s"],ego,self.clock,side,source_boundaries)
                     job.previous = previous
                     self.jobs[key] = job
                 self.jobs.move_to_end(key)

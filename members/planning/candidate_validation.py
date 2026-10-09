@@ -438,6 +438,9 @@ def validate_candidate(points, motion_direction, vehicle, limits, corridor, obst
                       details={"segment_count": len(segments), "validated_horizon_s": horizon})
         if isinstance(corridor,CorridorRegion):
             report['details'].update(region_count=len(planes.polygons),exterior_edge_count=planes.edge_count)
+            if hasattr(planes,'barrier_count'):
+                report['details']['source_perimeter_barrier_count']=planes.barrier_count
+                report['assumptions'].append('complete nominal source perimeter except explicitly source-bound shared openings')
     except PreparationLimit as error:
         report.update(status='inconclusive',reason_code='REGION_PREPARATION_LIMIT',
                       constraint='region_topology',details={'message':str(error)})

@@ -11,6 +11,7 @@ from core.interfaces import Perception, ManeuverEnvironment
 from core.behavior_contract import require as _require
 from core.validation import number
 from core.region_geometry import convex_polygon, inside, outline_contains_point
+from core.boundary_lineage import native_points3,decode_position,exact_point
 
 
 def _points(raw, dimensions, minimum=2, maximum=20000):
@@ -214,6 +215,30 @@ class ManeuverFacts(object):
         _require(isinstance(window, dict) and window.get('verification_model') == 'sdk_piecewise_linear_boundary_v1',
                  'MANEUVER_CROSSING_WINDOW_UNVERIFIED')
         boundary = _points(window.get('shared_boundary_world'), 3)
+        _require(window.get('source_lineage_model')=='native_edge_rational_v1'
+                 and window.get('source_lane_id')==self.p.lane.lane_id
+                 and window.get('source_boundary_side')==value['side'],
+                 'MANEUVER_CROSSING_SOURCE_LINEAGE_UNAVAILABLE')
+        native=_points(window.get('source_boundary_world'),3)
+        original=native_points3(self.p.lane.left_boundary if value['side']=='left' else self.p.lane.right_boundary)
+        _require(tuple(native)==original,'MANEUVER_CROSSING_NATIVE_SOURCE_MISMATCH')
+        closed=window.get('source_lane_boundaries')
+        _require(isinstance(closed,dict),'MANEUVER_CROSSING_SOURCE_PERIMETER_UNAVAILABLE')
+        borders={name:_points(closed.get(name),3) for name in ('left','right')}
+        _require(tuple(borders['left'])==native_points3(self.p.lane.left_boundary)
+                 and tuple(borders['right'])==native_points3(self.p.lane.right_boundary)
+                 and borders[value['side']]==native,'MANEUVER_CROSSING_NATIVE_SOURCE_MISMATCH')
+        source_positions=window.get('source_positions')
+        _require(isinstance(source_positions,list) and len(source_positions)==len(boundary),
+                 'MANEUVER_CROSSING_SOURCE_LINEAGE_UNAVAILABLE')
+        previous=None
+        for point,position in zip(boundary,source_positions):
+            self._fresh()
+            index,ratio=decode_position(position,len(native)); key=index+ratio
+            _require(point==tuple(float(v) for v in exact_point(native,position))
+                     and (previous is None or previous<key<=previous.numerator//previous.denominator+1),
+                     'MANEUVER_CROSSING_SOURCE_EDGE_MISMATCH')
+            previous=key
         stations = window.get('road_s_samples_m')
         _require(isinstance(stations, list) and len(stations) == len(boundary)
                  and all(number(v) for v in stations)
@@ -228,7 +253,7 @@ class ManeuverFacts(object):
         _require(len(positions) == len(boundary), 'MANEUVER_CROSSING_BOUNDARY_AMBIGUOUS')
         ranges = value.get('crossing_ranges_world')
         _require(isinstance(ranges, list) and len(ranges) <= 20000, 'MANEUVER_CROSSING_RANGES_INVALID')
-        fragments, count = [], 0
+        fragments, permitted_positions, count = [], [], 0
         for part in ranges:
             self._fresh()
             _require(isinstance(part, dict) and isinstance(part.get('marking'), dict)
@@ -239,15 +264,20 @@ class ManeuverFacts(object):
             index = positions.get(fragment[0])
             _require(index is not None and boundary[index:index+len(fragment)] == fragment
                      and part.get('road_s_samples_m') == stations[index:index+len(fragment)]
+                     and part.get('source_positions')==source_positions[index:index+len(fragment)]
                      and all(number(part['marking'].get(k)) for k in ('road_s_start_m', 'road_s_end_m'))
                      and min(part['road_s_samples_m']) >= part['marking']['road_s_start_m'] + window['road_s_transition_guard_m']
                      and max(part['road_s_samples_m']) <= part['marking']['road_s_end_m'] - window['road_s_transition_guard_m'],
                      'MANEUVER_CROSSING_FRAGMENT_NOT_BOUND')
             fragments.append(fragment)
+            permitted_positions.append([tuple(v) for v in part['source_positions']])
             count += len(fragment)
             _require(count <= 40000, 'MANEUVER_CROSSING_RANGES_INVALID')
         self._fresh()
         return dict(lane_id=lane_id, side=value['side'], shared_boundary_world=boundary,
+                    source_boundary_world=native,source_positions=[tuple(v) for v in source_positions],
+                    source_lane_boundaries=borders,
+                    permitted_source_positions=permitted_positions,source_lineage_model=window['source_lineage_model'],
                     permitted_fragments=fragments, map_digest=digest,
                     evidence=copy.deepcopy(value['marking_evidence']))
 
