@@ -38,7 +38,7 @@ def convex_polygon(raw):
     return points
 
 
-def simple_outline(raw, max_checks=100000):
+def simple_outline(raw, max_checks=100000, check_step=None):
     """Validate a possibly concave map outline without inventing a hull.
 
     Bound work for long SDK samples. Exhaustion is unknown geometry, never a
@@ -52,6 +52,7 @@ def simple_outline(raw, max_checks=100000):
     if len(set(points)) != len(points):
         raise ValueError("repeated outline vertex")
     for index,b in enumerate(points):
+        if check_step is not None: check_step()
         a,c=points[index-1],points[(index+1)%len(points)]
         if (abs(cross(a,b,c))<=1e-8
                 and (a[0]-b[0])*(c[0]-b[0])+(a[1]-b[1])*(c[1]-b[1])>1e-10):
@@ -62,8 +63,10 @@ def simple_outline(raw, max_checks=100000):
                    for i, (a,b) in enumerate(zip(points, points[1:]+points[:1])))
     active, checks = [], 0
     for edge in boxes:
+        if check_step is not None: check_step()
         active = [v for v in active if v[1]+1e-8 >= edge[0]]
         for prior in active:
+            if check_step is not None: check_step()
             checks += 1
             if checks > max_checks:
                 raise ValueError("outline validation budget exhausted")

@@ -4,6 +4,8 @@
 复用本模块前进规划器。详见[当前交接与剩余交付](../../perception/MANEUVER_ENVIRONMENT.md)。
 下文能力矩阵为 PR #21 的历史交付，P03/P04 等生成器仍未完成，不能据此声明已启用。
 
+2026-10-09 增量：P02 已在原校验器中补充显式非凸/多区域组合，保持实际边界、孔洞和空隙；来源、覆盖、整车跨线许可及生产生成器仍按完整任务继续交付。首次密集拓扑编译仍需增量预算，详见[候选校验](CANDIDATE_VALIDATION.md#显式非凸与多区域输入)。下文旧合同缺口和验证数字为原 PR #21 记录；公共环境/请求与 P07 信号停留的当前接入状态以顶部交接文档为准。
+
 2026-10-08，原始基线 main `568e9c983e568237009015e911c4092731d8e949`，审查修复已同步到包含决策 PR #20 的 main `5fb96ab`。任务来源为 [owner 在 Issue #7 补充的任务书](https://github.com/lsl1111/wangliancar/issues/7#issuecomment-6051910991)，开发顺序为 L0–L5，完整目标为 P01–P09。本文件记录当前进度，不把基础组件交付等同于全部行为完成。
 
 本轮使用项目 path-planning 工作流，仅新增规划私有组件、样例和测试。保留固定 `plan(perception, decision)`、前进链算法、公共类及 Python 3.6；没有把决策私有类、诊断文件或 `reason` 文本作为生产通道。
@@ -36,7 +38,7 @@ assert result["reason_code"] == "REQUEST_NOT_DISPATCHABLE"
 
 ### P02 整车与名义运动校验
 
-[candidate_validation.py](candidate_validation.py) 独立接受真实接口的 `TrajectoryPoint` 序列、显式方向、整车尺寸、运动限制、凸多边形可通行区域、目标预测和检查预算，输出结构化检查结果。详见 [候选校验的模型、接口与限制](CANDIDATE_VALIDATION.md)。
+[candidate_validation.py](candidate_validation.py) 独立接受真实接口的 `TrajectoryPoint` 序列、显式方向、整车尺寸、运动限制、凸多边形或显式简单轮廓并集、目标预测和检查预算，输出结构化检查结果。详见 [候选校验的模型、接口与限制](CANDIDATE_VALIDATION.md)。
 
 基础覆盖前后悬与四角、道路边界、点间扫掠、已知朝向矩形/未知朝向包围圆、明确恒速预测、点速度和时间及运动限制；不能证实时返回不确定，不因为采样点都避开障碍便宣布安全。结果针对给定插值和预测模型；实际控制按路径速度消费，不按相对时间追点，因此名义时空检查尚不是执行避碰保证。
 
