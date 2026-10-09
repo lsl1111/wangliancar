@@ -15,6 +15,7 @@ from members.control_stub import compute_control, configure_control
 from members.decision_stub import decide, decision_info, decision_settings, reset_decision
 from members.planning_stub import plan, configure_planning
 from core.behavior_channel import BehaviorTransport
+from parking_integration import ParkingInputBridge,PARKING_ACTIONS
 from perception.perception_builder import PerceptionBuilder
 from perception.route_manager import RouteManager, ROUTE_REFERENCE_VERSION
 from simone_platform.simone_adapter import SimOneAdapter
@@ -77,7 +78,7 @@ def target_input_summary(perception):
 
 
 class CaptainRuntime(object):
-    def __init__(self, config, logger):
+    def __init__(self, config, logger,parking_inputs_provider=None,parking_actions=()):
         self.config = config
         self.logger = logger
         self.adapter = SimOneAdapter(config, logger)
@@ -95,11 +96,21 @@ class CaptainRuntime(object):
         self._braking_event_count = 0
         self._braking_history = []
         self._braking_io_warned = False
-        planning_settings = configure_planning(config)
-        reset_decision()
+        if (not isinstance(parking_actions,(tuple,list)) or
+                (parking_actions and (set(parking_actions)!=set(PARKING_ACTIONS)
+                 or len(parking_actions)!=len(PARKING_ACTIONS)
+                 or parking_inputs_provider is None or getattr(config,'control_calibrated',False) is not True))):
+            raise ValueError('parking capabilities require explicit paired inputs and configured control')
+        self.parking=(ParkingInputBridge(parking_inputs_provider)
+                      if parking_inputs_provider is not None else None)
+        planning_settings = configure_planning(config,parking_inputs_provider=(
+            self.parking.planning_inputs if self.parking else None))
+        if self.parking: self.parking.settings=planning_settings
+        reset_decision(parking_inputs_provider=self.parking.decision_inputs if self.parking else None)
         _validate_motion_contract(planning_settings, decision_settings())
         self.safety = SafetySupervisor(config, planning_settings=planning_settings,
-                                       decision_settings=decision_settings())
+                                       decision_settings=decision_settings(),parking_guard=(
+                                           self.parking.assess if self.parking and parking_actions else None))
         self.runtime_info = decision_info()
         self.runtime_info.update({"pid": os.getpid(),
                                   "project_dir": os.path.dirname(os.path.abspath(__file__)),
@@ -108,8 +119,9 @@ class CaptainRuntime(object):
                                   "planning_settings": dict(vars(planning_settings)),
                                   "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         configure_control(config)
-        self.behaviors = BehaviorTransport(("PATH_STOP","DWELL","FEEDBACK")
-                                          if getattr(config,"control_calibrated",False) else ())
+        actions=list(("PATH_STOP","DWELL","FEEDBACK")
+                     if getattr(config,"control_calibrated",False) else ())
+        self.behaviors = BehaviorTransport(tuple(dict.fromkeys(actions+list(parking_actions))))
 
     def request_stop(self, unused_signal=None, unused_frame=None):
         self.stop_requested = True
@@ -193,6 +205,7 @@ class CaptainRuntime(object):
             repeated = last_frame == perception.frame_id
             last_frame = perception.frame_id
             self.behaviors.prepare(perception)
+            if self.parking: self.parking.prepare(perception)
             try:
                 decision = _member_output(decide(perception), DecisionTarget, perception)
             except Exception as exc:
@@ -387,6 +400,8 @@ class CaptainRuntime(object):
     def _publish_pipeline(self, perception, decision, trajectory, control, receipt, safety):
         return self._publish_json(self.pipeline_path, {
             "runtime": dict(self.runtime_info),
+            "parking_integration": {"configured": self.parking is not None,
+                                    "reason": self.parking.reason if self.parking else "NOT_CONFIGURED"},
             "evaluation": self._evaluation_status(),
             "perception_frame_id": perception.frame_id,
             "target_input": target_input_summary(perception),

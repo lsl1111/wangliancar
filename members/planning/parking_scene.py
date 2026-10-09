@@ -12,6 +12,54 @@ from members.planning.crossing_corridor import CrossingCorridor
 from members.planning.maneuver_scene import ManeuverGeometryCache
 from members.planning.lane_change_generator import _Failure,_require,_source_predictions
 from members.planning.parking_generator import generate_parking_segment
+from members.planning.candidate_validation import validate_candidate
+
+
+def validate_parking_path(perception,mission,stage,points,motion_direction,vehicle,limits,
+                          budget,prediction_envelopes,clock=None):
+    """Public current-source recheck for the captain's independent veto.
+
+    Reuse P02's nominal swept-body validator, not a new trajectory or an
+    execution acknowledgement. Budget is separate from the planner's search.
+    """
+    clock=clock or time.monotonic
+    report=dict(status='invalid',reason_code='PARKING_MONITOR_INPUT_INVALID',checks=0)
+    started=clock()
+    try:
+        require(stage in ('APPROACH','POSITION','REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE','EXIT'),
+                'PARKING_STAGE_UNSUPPORTED')
+        require(type(motion_direction) is int and motion_direction==(
+            -1 if stage in ('REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE') else 1),
+            'PARKING_STAGE_DIRECTION_MISMATCH')
+        require(isinstance(budget,ValidationBudget) and type(budget.max_checks) is int and budget.max_checks>0
+                and number(budget.deadline_monotonic_s) and clock()<budget.deadline_monotonic_s,
+                'PARKING_MONITOR_BUDGET_UNAVAILABLE')
+        scene=read_parking_scene(perception,mission.space_id,mission.road_lane_ids,
+            stage in ('REVERSE_ENTRY','ALIGN','PARKED_DWELL'),mission.access_edge_index,clock)
+        require(scene['map_digest']==mission.map_digest,'PARKING_MISSION_MAP_MISMATCH')
+        predictions=_source_predictions(scene['objects'],prediction_envelopes,clock())
+        deadline=min(budget.deadline_monotonic_s,
+            time.monotonic()+scene['source_valid_until_s']-clock())
+        for region,objects in ((scene['access_corridor'],predictions),(scene['coverage'],[])):
+            require(report['checks']<budget.max_checks,'PARKING_MONITOR_BUDGET_EXHAUSTED')
+            remaining=ValidationBudget(budget.max_checks-report['checks'],budget.max_depth,
+                                       budget.min_interval_s,deadline)
+            result=validate_candidate(points,motion_direction,vehicle,limits,region,objects,remaining)
+            report['checks']+=result['checks']
+            report.update(status=result['status'],reason_code=result['reason_code'])
+            if result['status']!='safe': return report
+        latest=read_parking_scene(perception,mission.space_id,mission.road_lane_ids,
+            stage in ('REVERSE_ENTRY','ALIGN','PARKED_DWELL'),mission.access_edge_index,clock)
+        require(all(latest[k]==scene[k] for k in ('bay','roads','objects','map_digest','source_valid_until_s'))
+                and latest['coverage'].polygons==scene['coverage'].polygons,
+                'PARKING_MONITOR_SOURCES_CHANGED_DURING_CHECK')
+        require(started<=clock()<scene['source_valid_until_s']
+                and time.monotonic()<deadline,'PARKING_MONITOR_SOURCE_EXPIRED_DURING_CHECK')
+        report.update(source_valid_until_s=scene['source_valid_until_s'])
+        return report
+    except (_Failure,ValueError,TypeError,AttributeError,KeyError,OverflowError) as error:
+        report.update(status='invalid',reason_code=error.code if isinstance(error,_Failure) else str(error))
+        return report
 
 
 def read_parking_scene(perception,space_id,road_lane_ids,goal_in_bay,access_edge_index,clock=None,geometry_cache=None):

@@ -386,9 +386,19 @@ class ParkingFixedEntryTests(unittest.TestCase):
         self.assertFalse(result['points']); self.assertIn('COVERAGE',result['reason_code'])
 
     def test_formal_decision_fixed_entry_control_transport_complete_original_stages(self):
+        from parking_integration import ParkingInputBridge,ParkingIntegrationInputs
+        from core.safety_supervisor import SafetySupervisor
+        from types import SimpleNamespace
         p=self.f.p; plant=BidirectionalPlant(x=p.ego.x,y=p.ego.y,heading=p.ego.heading,lag=.3)
+        def paired_inputs(perception,context):
+            return ParkingIntegrationInputs(self.decision_inputs(perception,context),
+                self.inputs(perception,context),budget(max_checks=1000000))
+        bridge=ParkingInputBridge(paired_inputs,self.f.clock); bridge.settings=self.settings
+        planning_stub.configure_planning(parking_inputs_provider=bridge.planning_inputs)
         decision_engine=DecisionEngine(DecisionSettings(front_offset_m=3.9,half_width_m=.9),
-                                      self.f.clock,self.decision_inputs)
+                                      self.f.clock,bridge.decision_inputs)
+        safety=SafetySupervisor(SimpleNamespace(),self.f.clock,self.settings,decision_engine.settings,
+                                parking_guard=bridge.assess)
         manager=patch('members.decision_stub._ENGINE',decision_engine)
         manager.start(); self.addCleanup(manager.stop)
         # One original packet has two explicitly verified convex view pieces.
@@ -402,6 +412,7 @@ class ParkingFixedEntryTests(unittest.TestCase):
         self.assertEqual(2,len(p.maneuver_environment.coverage_regions))
         seen=[]; identity=None; parked_at=None; exited_at=None; completed=False
         for tick in range(3000):
+            bridge.prepare(p)
             d=decision_stub.decide(p); validate_output(d,DecisionTarget,p)
             state=decision_stub.decision_behavior_info().get('parking',{})
             if state.get('status')=='COMPLETED': completed=True; break
@@ -413,7 +424,9 @@ class ParkingFixedEntryTests(unittest.TestCase):
             t=planning_stub.plan(p,d)
             self.assertTrue(t.valid,(tick,r['stage'],plant.x,plant.y,plant.heading,plant.speed,self.curvature,t.errors))
             c=control_stub.compute_control(p,t); self.assertTrue(c.valid,(tick,c.errors))
-            self.transport.observe(p,d,t,c)
+            assessment=safety.evaluate(p,d,t,c)
+            self.assertFalse(assessment.active,(tick,r['stage'],assessment.reason))
+            self.transport.observe(p,d,t,c,assessment.active)
             if self.engine.standstill.anchor is not None and parked_at is None: parked_at=self.f.now
             if r['stage']=='EXIT' and c.throttle>0 and exited_at is None: exited_at=self.f.now
             if parked_at is not None and self.f.now-parked_at<10.:
@@ -428,6 +441,7 @@ class ParkingFixedEntryTests(unittest.TestCase):
         self.assertIsNotNone(parked_at); self.assertIsNotNone(exited_at)
         self.assertGreaterEqual(exited_at-parked_at,10.)
         self.advance(GoalPose(plant.x,plant.y,plant.heading),plant.speed,plant.direction)
+        bridge.prepare(p)
         finished=decision_stub.decide(p)
         self.assertIsNone(finished.behavior_request)
         self.assertEqual('COMPLETED',decision_stub.decision_behavior_info()['parking']['status'])
