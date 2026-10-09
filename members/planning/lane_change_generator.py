@@ -44,6 +44,27 @@ class PredictionEnvelope(object):
         self.velocity_uncertainty_mps = velocity_uncertainty_mps
 
 
+def _source_predictions(objects, prediction_envelopes, now):
+    """Shared P03/P04 original-observation prediction adaptation."""
+    _require(isinstance(prediction_envelopes,dict)
+             and set(prediction_envelopes)==set(v['id'] for v in objects),'PREDICTION_OBJECT_SET_MISMATCH')
+    predictions=[]
+    for obj in objects:
+        envelope=prediction_envelopes[obj['id']]
+        _require(isinstance(envelope,PredictionEnvelope)
+                 and number(envelope.horizon_s) and envelope.horizon_s>0
+                 and all(number(v) and v>=0 for v in (envelope.position_uncertainty_m,
+                                                      envelope.velocity_uncertainty_mps)),
+                 'PREDICTION_ENVELOPE_UNAVAILABLE')
+        age=now-obj['evidence']['observed_at_s']
+        _require(number(age) and age>=0 and age<envelope.horizon_s,'PREDICTION_SOURCE_HORIZON_EXPIRED')
+        predictions.append(ObstaclePrediction(str(obj['id']),obj['x']+obj['vx']*age,
+            obj['y']+obj['vy']*age,obj['length'],obj['width'],obj['heading'],obj['vx'],obj['vy'],
+            envelope.horizon_s-age,envelope.position_uncertainty_m+envelope.velocity_uncertainty_mps*age,
+            envelope.velocity_uncertainty_mps))
+    return predictions
+
+
 class _Failure(Exception):
     def __init__(self, code, status='invalid'):
         self.code, self.status = code, status
@@ -63,14 +84,14 @@ class _Work(object):
         if self.count > self.budget.max_checks or time.monotonic() >= self.budget.deadline_monotonic_s:
             raise _Failure('BUDGET_EXHAUSTED', 'inconclusive')
 
-    def validate(self, points, vehicle, limits, region, objects):
+    def validate(self, points, vehicle, limits, region, objects, direction=1):
         self.step()
         remaining = self.budget.max_checks - self.count
         if remaining <= 0:
             raise _Failure('BUDGET_EXHAUSTED', 'inconclusive')
         budget = ValidationBudget(remaining, self.budget.max_depth,
                                   self.budget.min_interval_s, self.budget.deadline_monotonic_s)
-        result = validate_candidate(points, 1, vehicle, limits, region, objects, budget)
+        result = validate_candidate(points, direction, vehicle, limits, region, objects, budget)
         self.count += result['checks']
         if result['reason_code'] == 'BUDGET_EXHAUSTED':
             return result
@@ -78,7 +99,7 @@ class _Work(object):
         return result
 
 
-def _parameters(start, speed, curvature, cap, vehicle, limits, search, budget):
+def _motion_parameters(start, speed, curvature, cap, vehicle, limits, budget):
     _require(isinstance(start, (list, tuple)) and len(start) == 3
              and all(number(v) for v in start), 'START_REAR_AXLE_POSE_INVALID')
     _require(number(speed) and speed >= 0 and number(curvature)
@@ -93,6 +114,16 @@ def _parameters(start, speed, curvature, cap, vehicle, limits, search, budget):
     _require(speed <= min(cap, limits.max_speed_mps)
              and abs(math.atan(vehicle.wheelbase_m*curvature)) <= limits.max_front_steer_rad,
              'INITIAL_MOTION_OUTSIDE_LIMITS')
+    _require(isinstance(budget, ValidationBudget)
+             and type(budget.max_checks) is int and budget.max_checks > 0
+             and type(budget.max_depth) is int and 0 <= budget.max_depth <= 40
+             and number(budget.min_interval_s) and budget.min_interval_s > 0
+             and number(budget.deadline_monotonic_s) and budget.deadline_monotonic_s > 0,
+             'VALIDATION_BUDGET_INVALID')
+
+
+def _parameters(start, speed, curvature, cap, vehicle, limits, search, budget):
+    _motion_parameters(start,speed,curvature,cap,vehicle,limits,budget)
     _require(isinstance(search, LaneChangeSearch), 'LANE_CHANGE_SEARCH_UNAVAILABLE')
     for values in (search.distances_m, search.tangent_scales, search.speed_scales):
         _require(isinstance(values, (list, tuple)) and 1 <= len(values) <= 8
@@ -103,12 +134,6 @@ def _parameters(start, speed, curvature, cap, vehicle, limits, search, budget):
              and type(search.max_points) is int and 3 <= search.max_points <= 2000
              and number(search.projection_ambiguity_m) and search.projection_ambiguity_m >= 0,
              'SEARCH_BOUNDS_INVALID')
-    _require(isinstance(budget, ValidationBudget)
-             and type(budget.max_checks) is int and budget.max_checks > 0
-             and type(budget.max_depth) is int and 0 <= budget.max_depth <= 40
-             and number(budget.min_interval_s) and budget.min_interval_s > 0
-             and number(budget.deadline_monotonic_s) and budget.deadline_monotonic_s > 0,
-             'VALIDATION_BUDGET_INVALID')
 
 
 def _reference(raw, start, ambiguity, vehicle, work):
@@ -180,14 +205,15 @@ def _value(coefficients, u):
     return value, derivative
 
 
-def _shape(start, goal, curvature, scale, search, work):
+def _shape(start, goal, curvature, scale, search, work, direction=1, end_scale=None):
     chord = math.hypot(goal[0]-start[0], goal[1]-start[1])
     _require(number(chord) and chord > EPS, 'CONNECTOR_DEGENERATE')
     tangent = chord*scale
+    end_tangent = chord*(scale if end_scale is None else end_scale)
     c, s = math.cos(start[2]), math.sin(start[2])
     end_c, end_s = math.cos(goal[2]), math.sin(goal[2])
-    cx = _coefficients(goal[0]-start[0], tangent*c, tangent*end_c, -s*curvature*tangent*tangent)
-    cy = _coefficients(goal[1]-start[1], tangent*s, tangent*end_s, c*curvature*tangent*tangent)
+    cx = _coefficients(goal[0]-start[0], direction*tangent*c, direction*end_tangent*end_c, -s*curvature*tangent*tangent)
+    cy = _coefficients(goal[1]-start[1], direction*tangent*s, direction*end_tangent*end_s, c*curvature*tangent*tangent)
     intervals = max(2, int(math.ceil(chord/search.spacing_m)))
     while intervals+1 <= search.max_points:
         shape = []
@@ -197,7 +223,8 @@ def _shape(start, goal, curvature, scale, search, work):
             x, dx = _value(cx, u); y, dy = _value(cy, u)
             _require(all(number(v) for v in (x, y, dx, dy)) and math.hypot(dx, dy) > EPS,
                      'CONNECTOR_TANGENT_UNRESOLVED')
-            shape.append((start[0]+x, start[1]+y, math.atan2(dy, dx)))
+            heading = math.atan2(dy,dx)+(math.pi if direction==-1 else 0.)
+            shape.append((start[0]+x, start[1]+y, normalize_angle(heading)))
         shape[0], shape[-1] = tuple(start), tuple(goal)
         lengths = [math.hypot(b[0]-a[0], b[1]-a[1]) for a,b in zip(shape, shape[1:])]
         _require(all(number(v) and v > EPS for v in lengths), 'CONNECTOR_SEGMENT_UNRESOLVED')
@@ -207,7 +234,8 @@ def _shape(start, goal, curvature, scale, search, work):
     raise _Failure('CANDIDATE_POINT_LIMIT', 'inconclusive')
 
 
-def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, work):
+def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, work,
+           direction=1, stop_at_goal=False):
     bounds = [min(cap, limits.max_speed_mps)]*len(shape)
     def restrict(indices, k):
         _require(number(k) and abs(math.atan(vehicle.wheelbase_m*k)) <= limits.max_front_steer_rad,
@@ -218,7 +246,7 @@ def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, wo
             bounds[i] = min(bounds[i], speed)
     for i, (a, b) in enumerate(zip(shape, shape[1:])):
         work.step()
-        restrict((i, i+1), normalize_angle(b[2]-a[2])/lengths[i])
+        restrict((i, i+1), normalize_angle(b[2]-a[2])/(direction*lengths[i]))
     for i in range(1, len(shape)-1):
         work.step()
         a, b, c = shape[i-1:i+2]
@@ -234,7 +262,7 @@ def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, wo
             along += lengths[i-1]
         braking_floor = math.sqrt(max(0., initial*initial-2*limits.max_deceleration_mps2*along))
         bounds[i] = min(bounds[i], max(desired, braking_floor))
-    bounds[-1] = min(bounds[-1], desired)
+    bounds[-1] = 0. if stop_at_goal else min(bounds[-1], desired)
     for i in range(len(bounds)-2, -1, -1):
         work.step()
         bounds[i] = min(bounds[i], math.sqrt(bounds[i+1]**2+2*limits.max_deceleration_mps2*lengths[i]))
@@ -249,7 +277,7 @@ def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, wo
             _require(speeds[i-1]+speeds[i] > EPS, 'ZERO_SPEED_CANNOT_TRAVERSE_CONNECTOR')
             elapsed += 2*lengths[i-1]/(speeds[i-1]+speeds[i])
         points.append(TrajectoryPoint(pose[0], pose[1], speeds[i], pose[2], elapsed))
-    first_steer = math.atan(vehicle.wheelbase_m*normalize_angle(shape[1][2]-shape[0][2])/lengths[0])
+    first_steer = math.atan(vehicle.wheelbase_m*normalize_angle(shape[1][2]-shape[0][2])/(direction*lengths[0]))
     initial_rate = abs(first_steer-math.atan(vehicle.wheelbase_m*curvature))/(points[1].relative_time*.5)
     _require(initial_rate <= limits.max_steer_rate_rad_s+EPS, 'INITIAL_STEERING_RATE_LIMIT')
     return points
@@ -357,23 +385,7 @@ def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_i
         _require(target_lane_id != source_lane_id, 'TARGET_ALREADY_CURRENT_LANE')
         scene = read_maneuver_scene(perception, (source_lane_id, target_lane_id), clock, geometry_cache)
         now = clock()
-        objects = scene['objects']
-        _require(isinstance(prediction_envelopes, dict)
-                 and set(prediction_envelopes)==set(v['id'] for v in objects), 'PREDICTION_OBJECT_SET_MISMATCH')
-        predictions = []
-        for obj in objects:
-            envelope = prediction_envelopes[obj['id']]
-            _require(isinstance(envelope, PredictionEnvelope)
-                     and number(envelope.horizon_s) and envelope.horizon_s > 0
-                     and all(number(v) and v >= 0 for v in (envelope.position_uncertainty_m,
-                                                           envelope.velocity_uncertainty_mps)),
-                     'PREDICTION_ENVELOPE_UNAVAILABLE')
-            age = now-obj['evidence']['observed_at_s']
-            _require(number(age) and age >= 0 and age < envelope.horizon_s, 'PREDICTION_SOURCE_HORIZON_EXPIRED')
-            predictions.append(ObstaclePrediction(str(obj['id']), obj['x']+obj['vx']*age,
-                obj['y']+obj['vy']*age, obj['length'], obj['width'], obj['heading'], obj['vx'], obj['vy'],
-                envelope.horizon_s-age, envelope.position_uncertainty_m+envelope.velocity_uncertainty_mps*age,
-                envelope.velocity_uncertainty_mps))
+        predictions = _source_predictions(scene['objects'],prediction_envelopes,now)
         facts = ManeuverFacts(perception, clock)
         target = next(v for v in scene['roads'] if v['lane_id']==target_lane_id)
         target_region = CorridorRegion([target['polygon']])

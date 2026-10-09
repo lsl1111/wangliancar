@@ -201,6 +201,58 @@ class ManeuverFacts(object):
         _require(len(identities) == len(set(identities)), 'MANEUVER_NEIGHBOR_DUPLICATE')
         return list(identities)
 
+    def parking(self, space_id):
+        """Current SDK bay + complete Sensor occupancy, not an entry route.
+
+        SDK a-d front is retained as geometry; it alone grants no road rule or
+        parking access authority. Original catalogue and environment must agree.
+        """
+        digest=self.map_digest()
+        _require(type(space_id) is int and space_id>=0 and self.p.parking_spaces_valid is True
+                 and isinstance(self.p.parking_spaces,list) and len(self.p.parking_spaces)<=4096
+                 and isinstance(self.env.parking_spaces,list) and len(self.env.parking_spaces)<=4096
+                 and isinstance(self.p.map_observation_status,dict),
+                 'MANEUVER_PARKING_CATALOGUE_UNAVAILABLE')
+        meta=self.p.map_observation_status.get('parking_spaces',{})
+        _require(isinstance(meta,dict) and meta.get('source')=='hdmap' and meta.get('read_ok') is True
+                 and meta.get('api')=='getParkingSpaceList' and type(meta.get('invalid_records')) is int
+                 and meta.get('invalid_records')==0
+                 and meta.get('clock')=='static_map' and meta.get('version')=='map-observations-v1'
+                 and meta.get('coverage_complete') is True,'MANEUVER_PARKING_CATALOGUE_UNVERIFIED')
+        original=[v for v in self.p.parking_spaces if isinstance(v,dict) and v.get('id')==space_id]
+        matches=[v for v in self.env.parking_spaces if isinstance(v,dict) and v.get('id')==space_id]
+        _require(len(original)==len(matches)==1,'MANEUVER_PARKING_ID_UNAVAILABLE_OR_DUPLICATE')
+        raw,value=original[0],matches[0]
+        _require(type(raw.get('id')) is int and type(value.get('id')) is int
+                 and raw.get('source')=='hdmap' and raw.get('valid') is True
+                 and type(raw.get('heading_valid')) is bool
+                 and (not raw['heading_valid'] or number(raw.get('heading')))
+                 and all(number(raw.get(v)) for v in ('x','y','z')),
+                 'MANEUVER_PARKING_MAP_GEOMETRY_UNVERIFIED')
+        knots=_points(raw.get('boundary_knots'),3,minimum=4,maximum=4)
+        entrance=_points(raw.get('entrance_edge'),3,minimum=2,maximum=2)
+        _require(entrance==[knots[0],knots[3]]
+                 and all(abs(p[2]-self.p.ego.z)<=.1 for p in knots),
+                 'MANEUVER_PARKING_ENTRANCE_OR_PLANE_MISMATCH')
+        boundary=convex_polygon([v[:2] for v in knots])
+        _require(value.get('geometry_valid') is True
+                 and all(value.get(k)==raw.get(k) for k in ('id','x','y','z','heading','heading_valid','heading_vector',
+                                                           'boundary_knots','entrance_edge','source','valid'))
+                 and _points(value.get('boundary'),2,minimum=4,maximum=4)==boundary,
+                 'MANEUVER_PARKING_ORIGINAL_GEOMETRY_MISMATCH')
+        objects=self.objects()
+        evidence=self._evidence(value.get('evidence'),'verified_fusion',True)
+        _require(value.get('occupancy')=='empty' and value.get('occupancy_verified') is True
+                 and value.get('coverage_verified') is True and value.get('blocking_object_ids')==[],
+                 'MANEUVER_PARKING_OCCUPIED_OR_UNOBSERVED')
+        views=[v for v in self.coverage(knots) if all(inside(p[:2],v['polygon']) for p in knots)]
+        _require(bool(views),'MANEUVER_PARKING_COVERAGE_UNKNOWN')
+        self._fresh(True)
+        return dict(id=space_id,boundary_knots=knots,entrance_edge=entrance,boundary=boundary,
+                    map_heading_rad=raw['heading'] if raw['heading_valid'] else None,
+                    map_digest=digest,evidence=evidence,coverage=views,
+                    objects=objects,occupancy='empty',authority='bay_geometry_and_current_occupancy_only')
+
     def crossing(self, lane_id):
         digest = self.map_digest()
         _require(lane_id in self.neighbors(), 'MANEUVER_NEIGHBOR_UNAVAILABLE')
