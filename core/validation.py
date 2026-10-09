@@ -47,9 +47,25 @@ def validate_output(value, expected, source):
         if (not isinstance(value.stop_obligation_id,str) or (identity is not None and
                 (not isinstance(identity,dict) or set(identity)!={"intent_id","stage","revision"}
                  or not all(isinstance(identity.get(k),str) and identity[k] for k in ("intent_id","stage"))
-                 or type(identity.get("revision")) is not int or identity["revision"]<1
-                 or not value.stop_obligation_id or value.hold_duration_s<=0))):
+                 or type(identity.get("revision")) is not int or identity["revision"]<1))):
             raise ValueError("invalid behavior execution identity")
+        if identity is not None and not value.stop_obligation_id:
+            # Moving behavior paths carry identity without a dwell duty. Keep
+            # this boundary limited to an actually acknowledged P03 stage.
+            reply=value.behavior_feedback
+            if (value.hold_duration_s!=0 or identity['stage'] not in ('EXECUTE','SETTLE')
+                    or not isinstance(reply,dict) or reply.get('producer')!='planning'
+                    or reply.get('status')!='PLANNED' or reply.get('usable') is not True
+                    or any(reply.get(k)!=identity[k] for k in ('intent_id','stage','revision'))
+                    or reply.get('source_frame_id')!=value.frame_id
+                    or reply.get('produced_frame_id')!=value.frame_id
+                    or reply.get('clock_id')!='process_monotonic'
+                    or not number(reply.get('produced_at_s'))
+                    or not number(reply.get('valid_until_s'))
+                    or not reply['produced_at_s']<=time.monotonic()<value.valid_until<=reply['valid_until_s']):
+                raise ValueError('unacknowledged moving behavior execution identity')
+        elif identity is not None and value.hold_duration_s<=0:
+            raise ValueError('invalid behavior dwell identity')
         if (not number(value.target_speed) or value.target_speed < 0
                 or len(value.points) < 2 or type(value.emergency_stop) is not bool
                 or type(value.stop_required) is not bool

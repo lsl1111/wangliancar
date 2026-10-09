@@ -1,5 +1,6 @@
 """Captain-owned transport and previous-frame feedback; no member internals."""
 import copy
+import math
 import time
 import uuid
 
@@ -72,6 +73,7 @@ class BehaviorTransport(object):
         self.actions,self.clock = tuple(actions),clock or time.monotonic
         self.scope,self.context,self.frame,self.feedbacks = None,None,None,[]
         self._progress = {}
+        self._motion_progress = {}
 
     def prepare(self,p):
         now = self.clock()
@@ -87,6 +89,7 @@ class BehaviorTransport(object):
         if (scope!=self.scope or (self.frame is not None and p.frame_id<self.frame)):
             self.scope,self.context = scope,TaskContext(*(scope+("runtime:"+uuid.uuid4().hex,)))
             self.feedbacks,self._progress = [],{}
+            self._motion_progress = {}
         self.frame = p.frame_id
         caps = Capabilities(self.context,self.actions,now,p.valid_until,usable=bool(self.actions))
         p.behavior_channel = dict(contract_version=CHANNEL_VERSION,context=self.context.to_dict(),
@@ -121,6 +124,24 @@ class BehaviorTransport(object):
                 key = (request["intent_id"],request["revision"])
                 initial = self._progress.setdefault(key,max(0.,request["stop_distance_m"]))
                 progress = max(0.,min(1.,1.-max(0.,request["stop_distance_m"])/initial)) if initial>0 else 0.
+                if (actual and request.get('maneuver') in ('LANE_CHANGE','AVOID','OVERTAKE','MERGE')
+                        and request['stage'] in ('EXECUTE','SETTLE')):
+                    pose=request.get('goal_pose')
+                    if (isinstance(pose,dict) and pose.get('reference_point')=='ego_rear_axle'
+                            and all(finite(pose.get(k)) for k in ('x','y','body_heading_rad'))):
+                        target=tuple(pose[k] for k in ('x','y','body_heading_rad'))
+                        remaining=math.hypot(p.ego.x-target[0],p.ego.y-target[1])
+                        previous=self._motion_progress.setdefault(key,(target,remaining,0.))
+                        if previous[0]!=target:
+                            failed=True
+                        else:
+                            # Actual GPS distance reduction, not path time or
+                            # planner acceptance. Even progress=1 cannot mark
+                            # arrival, settled lane, lights or completed dwell.
+                            progress=max(previous[2],max(0.,min(1.,1.-remaining/previous[1]))) if previous[1]>0 else 0.
+                            self._motion_progress[key]=(target,previous[1],progress)
+                        if len(self._motion_progress)>128:
+                            self._motion_progress={key:self._motion_progress[key]}
                 arrived = bool(actual and observation.get("goal_pose_arrived") is True)
                 elapsed = observation.get("standstill_duration_s",0.) if actual else 0.
                 completed = bool(actual and observation.get("hold_completed") is True)

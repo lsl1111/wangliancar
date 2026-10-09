@@ -260,6 +260,7 @@ class LaneChangePolicy(object):
         if safe:
             self.session.goal.speed_cap_mps=self._speed_cap
         reply = self.session.last_feedback
+        checked_revision=request.revision
         if self.session.stage == "PREPARE":
             if (reply is not None and reply.producer in ("control", "runtime")
                     and reply.lights_confirmed and reply.lights_duration_s >= self.indicator_lead_s):
@@ -291,4 +292,12 @@ class LaneChangePolicy(object):
                         request = self.session.finish(frame, True, "TARGET_LANE_SETTLED")
             else:
                 self._settled = 0
+        if self.session.revision!=checked_revision and self.session.status=='REQUESTED':
+            # advance() deliberately withdraws the old dispatch. Check the
+            # new stage's capabilities in this same frame; never replay the
+            # old acknowledgement against the new revision or count time twice.
+            request=self.session.tick(frame,capabilities,safety_override=safety_override)
+            if not request.dispatch_allowed:
+                self._settled=0
+                return PolicyResult(request,True,request.reason_code,request.status)
         return PolicyResult(request, not safe, reason, self.session.stage)
