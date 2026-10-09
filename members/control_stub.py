@@ -24,6 +24,14 @@ def compute_control(perception, trajectory):
         arrived = bool(same and guard.anchor is not None and ego.speed<=_engine.settings.gear_standstill_speed_mps
             and math.hypot(ego.x-guard.anchor[0],ego.y-guard.anchor[1])<=_engine.settings.precision_arrival_tolerance_m
             and abs(normalize_angle(ego.heading-guard.anchor[2]))<=_engine.settings.precision_heading_tolerance_rad)
+        if (not trajectory.stop_obligation_id and not guard.active
+                and identity.get('stage') in ('APPROACH','POSITION','EXIT_PREPARE','EXIT')
+                and trajectory.precision_stop and trajectory.stop_required and trajectory.points):
+            end=trajectory.points[-1]
+            arrived=bool(output.diagnostics.get('stop_pose_arrived') is True
+                and ego.speed<=_engine.settings.gear_standstill_speed_mps
+                and math.hypot(ego.x-end.x,ego.y-end.y)<=_engine.settings.precision_arrival_tolerance_m
+                and abs(normalize_angle(ego.heading-end.heading))<=_engine.settings.precision_heading_tolerance_rad)
         output.execution_observation = dict(identity=dict(identity),goal_pose_arrived=arrived,
             standstill_duration_s=guard.elapsed if arrived else 0.,
             hold_completed=bool(arrived and guard.elapsed>=guard.duration>=trajectory.hold_duration_s>0))

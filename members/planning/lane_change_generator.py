@@ -99,7 +99,7 @@ class _Work(object):
         return result
 
 
-def _motion_parameters(start, speed, curvature, cap, vehicle, limits, budget):
+def _motion_parameters(start, speed, curvature, cap, vehicle, limits, budget,allow_initial_overspeed=False):
     _require(isinstance(start, (list, tuple)) and len(start) == 3
              and all(number(v) for v in start), 'START_REAR_AXLE_POSE_INVALID')
     _require(number(speed) and speed >= 0 and number(curvature)
@@ -111,7 +111,7 @@ def _motion_parameters(start, speed, curvature, cap, vehicle, limits, budget):
                  for k, v in vars(limits).items())
              and limits.max_front_steer_rad < math.pi/2
              and limits.heading_tolerance_rad < math.pi/2, 'MOTION_LIMITS_UNAVAILABLE')
-    _require(speed <= min(cap, limits.max_speed_mps)
+    _require(speed <= limits.max_speed_mps and (allow_initial_overspeed or speed<=cap)
              and abs(math.atan(vehicle.wheelbase_m*curvature)) <= limits.max_front_steer_rad,
              'INITIAL_MOTION_OUTSIDE_LIMITS')
     _require(isinstance(budget, ValidationBudget)
@@ -238,13 +238,20 @@ def _shape(start, goal, curvature, scale, search, work, direction=1, end_scale=N
 
 
 def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, work,
-           direction=1, stop_at_goal=False):
+           direction=1, stop_at_goal=False,allow_initial_overspeed=False):
     bounds = [min(cap, limits.max_speed_mps)]*len(shape)
+    if allow_initial_overspeed:
+        along=0.
+        for i in range(len(bounds)):
+            work.step()
+            if i: along+=lengths[i-1]
+            bounds[i]=min(limits.max_speed_mps,max(cap,math.sqrt(max(0.,
+                initial*initial-2*limits.max_deceleration_mps2*along))))
     def restrict(indices, k):
         _require(number(k) and abs(math.atan(vehicle.wheelbase_m*k)) <= limits.max_front_steer_rad,
                  'CONNECTOR_STEERING_LIMIT')
         speed = (math.sqrt(limits.max_lateral_acceleration_mps2/abs(k)) if abs(k) > EPS
-                 else min(cap,limits.max_speed_mps))
+                 else limits.max_speed_mps if allow_initial_overspeed else min(cap,limits.max_speed_mps))
         for i in indices:
             bounds[i] = min(bounds[i], speed)
     for i, (a, b) in enumerate(zip(shape, shape[1:])):

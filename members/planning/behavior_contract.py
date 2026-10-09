@@ -73,7 +73,10 @@ def _strings(value, reason):
     return set(value)
 
 
-def _goal(request, current_lane_id, runtime_stop=False, runtime_lane_change=False):
+PARKING_STAGES=('APPROACH','POSITION','REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE','EXIT')
+
+
+def _goal(request, current_lane_id, runtime_stop=False, runtime_lane_change=False,runtime_parking=False):
     source=request.get('source_lane_id')
     _require(source is None or _text(source),'SOURCE_LANE_INVALID')
     _require(runtime_lane_change or source is None,'UNSUPPORTED_SOURCE_LANE')
@@ -99,6 +102,22 @@ def _goal(request, current_lane_id, runtime_stop=False, runtime_lane_change=Fals
     _keys(lights, _LIGHT_KEYS, "LIGHT_INTENT_INVALID")
     _require(all(type(value) is bool for value in lights.values())
              and not (lights["left_signal"] and lights["right_signal"]), "LIGHT_INTENT_INVALID")
+    if runtime_parking:
+        stage=request['stage']
+        _require(request['maneuver']=='PARK' and stage in PARKING_STAGES,'PARKING_STAGE_NOT_PLANNABLE')
+        _require(source is None and lane is None and parking is not None and parking>=0 and pose is not None,
+                 'PARKING_FIXED_TARGET_REQUIRED')
+        reverse=stage in ('REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE')
+        dwelling=stage in ('REVERSE_ENTRY','ALIGN','PARKED_DWELL')
+        _require(request['motion_direction']==(-1 if reverse else 1),'PARKING_STAGE_DIRECTION_MISMATCH')
+        _require(speed>0 and distance==-1 and request['precision_stop'] and not any(lights.values()),
+                 'PARKING_GOAL_EXTENSIONS_UNSUPPORTED')
+        _require((dwelling and dwell>=10 and request['parking_brake_at_stop']
+                  and obligation=='parking:'+str(parking)) or
+                 (not dwelling and dwell==0 and not request['parking_brake_at_stop'] and obligation is None),
+                 'PARKING_DWELL_OBLIGATION_INVALID')
+        _require(_text(current_lane_id),'CURRENT_LANE_UNKNOWN',True)
+        return
     stop_required = (request["maneuver"] == "STOP" or request["precision_stop"]
                      or dwell > 0 or request["parking_brake_at_stop"] or obligation is not None)
     _require(not stop_required or distance >= 0, "STOP_DISTANCE_UNKNOWN", True)
@@ -135,7 +154,7 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                             clock_id, active_identity, capabilities=None,
                             supported_actions=(), current_lane_id="",
                             frame_usable=False, frame_paused=True, runtime_stop=False,
-                            runtime_lane_change=False):
+                            runtime_lane_change=False,runtime_parking=False):
     """Validate one proposal for an explicitly enabled forward component trial.
 
     ``now_s`` is the actual check time in ``clock_id``; the current frame's
@@ -178,10 +197,10 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                  and active_identity["issued_at_s"] <= now_s, "ACTIVE_IDENTITY_INVALID")
         _require(isinstance(request,dict) and set(request) in
                  (_REQUEST_KEYS,_REQUEST_KEYS|{'source_lane_id'}),'REQUEST_SCHEMA')
-        _require(type(runtime_stop) is bool and type(runtime_lane_change) is bool
-                 and not (runtime_stop and runtime_lane_change)
+        _require(all(type(v) is bool for v in (runtime_stop,runtime_lane_change,runtime_parking))
+                 and sum((runtime_stop,runtime_lane_change,runtime_parking))<=1
                  and request["contract_version"] == CONTRACT_VERSION
-                 and request["interface_status"] == ("runtime_connected" if runtime_stop or runtime_lane_change
+                 and request["interface_status"] == ("runtime_connected" if runtime_stop or runtime_lane_change or runtime_parking
                                                        else "proposal_not_runtime_connected"), "REQUEST_VERSION")
         _context(request["task_context"], "REQUEST_CONTEXT_INVALID")
         _require(request["task_context"] == context, "REQUEST_CONTEXT_MISMATCH")
@@ -202,12 +221,13 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
         _require(isinstance(request["reason_code"], str) and type(request["attempt"]) is int
                  and request["attempt"] >= 0, "REQUEST_VALUES")
         enabled = _strings(supported_actions, "LOCAL_ACTIONS_INVALID")
-        implemented = LANE_CHANGE_ACTIONS if runtime_lane_change else ("SIGNAL_STOP",) if runtime_stop else COMPONENT_ACTIONS
+        implemented = (('PARK',) if runtime_parking else LANE_CHANGE_ACTIONS if runtime_lane_change
+                       else ("SIGNAL_STOP",) if runtime_stop else COMPONENT_ACTIONS)
         _require(enabled <= set(implemented), "LOCAL_ACTIONS_UNSUPPORTED")
         action = request["maneuver"]
         _require(action in implemented, "UNSUPPORTED_MANEUVER")
         _require(action in enabled, "LOCAL_ACTION_DISABLED")
-        _goal(request, current_lane_id, runtime_stop,runtime_lane_change)
+        _goal(request, current_lane_id, runtime_stop,runtime_lane_change,runtime_parking)
         _require(capabilities is not None, "CAPABILITIES_UNAVAILABLE", True)
         _keys(capabilities, _CAPABILITY_KEYS, "CAPABILITY_SCHEMA")
         _context(capabilities["context"], "CAPABILITY_CONTEXT_INVALID")
@@ -219,12 +239,14 @@ def assess_behavior_request(request, context, frame_id, now_s, valid_until_s,
                  "CAPABILITY_NOT_CURRENT", True)
         actions = _strings(capabilities["actions"], "CAPABILITY_ACTIONS_INVALID")
         required = "PATH_STOP" if request["stop_distance_m"] >= 0 else "PATH"
-        needs = (('LANE_CHANGE','PATH','LIGHTS','FEEDBACK') if runtime_lane_change else
+        needs = (('PARK','PATH','FEEDBACK')+ (('REVERSE','DWELL') if request['stage'] in
+                 ('REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE') else ()) if runtime_parking else
+                 ('LANE_CHANGE','PATH','LIGHTS','FEEDBACK') if runtime_lane_change else
                  (required,'DWELL','FEEDBACK') if runtime_stop else (required,))
         missing = sorted(set(needs) - actions)
         _require(not missing, "CAPABILITY_ACTIONS_MISSING", True, missing)
         result.update(eligible=True, status="READY_FOR_COMPONENT", reason_code="CONTRACT_CHECKED",
-                      request=copy.deepcopy(request),production_connected=runtime_stop or runtime_lane_change)
+                      request=copy.deepcopy(request),production_connected=runtime_stop or runtime_lane_change or runtime_parking)
     except _Rejected as error:
         result.update(reason_code=error.reason_code, retryable=error.retryable,
                       missing_capabilities=list(error.missing))

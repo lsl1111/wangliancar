@@ -124,8 +124,10 @@ class BehaviorTransport(object):
                 key = (request["intent_id"],request["revision"])
                 initial = self._progress.setdefault(key,max(0.,request["stop_distance_m"]))
                 progress = max(0.,min(1.,1.-max(0.,request["stop_distance_m"])/initial)) if initial>0 else 0.
-                if (actual and request.get('maneuver') in ('LANE_CHANGE','AVOID','OVERTAKE','MERGE')
-                        and request['stage'] in ('EXECUTE','SETTLE')):
+                if (actual and ((request.get('maneuver') in ('LANE_CHANGE','AVOID','OVERTAKE','MERGE')
+                        and request['stage'] in ('EXECUTE','SETTLE')) or
+                        (request.get('maneuver')=='PARK' and request['stage'] in
+                         ('APPROACH','POSITION','REVERSE_ENTRY','ALIGN','PARKED_DWELL','EXIT_PREPARE','EXIT')))):
                     pose=request.get('goal_pose')
                     if (isinstance(pose,dict) and pose.get('reference_point')=='ego_rear_axle'
                             and all(finite(pose.get(k)) for k in ('x','y','body_heading_rad'))):

@@ -4,38 +4,13 @@ Task poses/access must come from an explicit caller-verified mission. Neither
 SDK bay front geometry nor Sensor probability establishes an entry mission,
 vehicle heading, legal access or physical prediction error model.
 """
-import copy
 import math
 
 from core.behavior_contract import GoalPose,require,finite
 from core.maneuver_facts import ManeuverFacts
+from core.parking_mission import ParkingMission
 from members.decision.behaviors.observations import Evidence,MotionObject,vehicle_footprint
 from members.decision.behaviors.parking import ParkingArea,ParkingFacts,ParkingSpace
-
-
-class ParkingMission(object):
-    """Explicit verified-task snapshot, not inferred from bay/case numbers."""
-    def __init__(self,evidence,mission_id,map_digest,space_id,road_lane_ids,access_edge_index,
-                 body_heading_rad,approach_pose,position_pose,exit_goal):
-        require(isinstance(evidence,Evidence) and isinstance(mission_id,str) and bool(mission_id)
-                and isinstance(map_digest,str) and type(space_id) is int and space_id>=0,
-                'PARKING_MISSION_IDENTITY_INVALID')
-        require(isinstance(road_lane_ids,(tuple,list)) and 1<=len(road_lane_ids)<=3
-                and all(isinstance(v,str) and v for v in road_lane_ids)
-                and len(set(road_lane_ids))==len(road_lane_ids), 'PARKING_MISSION_ROAD_SET_INVALID')
-        require(type(access_edge_index) is int and 0<=access_edge_index<=3
-                and finite(body_heading_rad) and all(isinstance(v,GoalPose) for v in
-                    (approach_pose,position_pose,exit_goal)), 'PARKING_MISSION_POSES_OR_ACCESS_UNAVAILABLE')
-        self.evidence,self.mission_id,self.map_digest=evidence,mission_id,map_digest
-        self.space_id,self.road_lane_ids,self.access_edge_index=space_id,tuple(road_lane_ids),access_edge_index
-        self.body_heading_rad=body_heading_rad
-        self.approach_pose,self.position_pose,self.exit_goal=copy.deepcopy((approach_pose,position_pose,exit_goal))
-
-    def binding(self,bay):
-        poses=tuple((v.x,v.y,v.body_heading_rad) for v in (self.approach_pose,self.position_pose,self.exit_goal))
-        return (self.mission_id,self.map_digest,self.space_id,self.road_lane_ids,self.access_edge_index,
-                self.body_heading_rad,poses,tuple(bay['boundary_knots']),tuple(bay['entrance_edge']),
-                self.evidence.source_kind,self.evidence.source,self.evidence.clock_id)
 
 
 def parking_facts(perception,frame,mission,vehicle_extents,position_uncertainty_m,
@@ -55,9 +30,7 @@ def parking_facts(perception,frame,mission,vehicle_extents,position_uncertainty_
             allowed_source_kinds=('task','verified_fusion')),'PARKING_TASK_MISSION_UNVERIFIED')
     # Revalidate/detach mutable caller input at every read; an old instance
     # cannot bypass the constructor by replacing a pose, access or road set.
-    mission=ParkingMission(mission.evidence,mission.mission_id,mission.map_digest,mission.space_id,
-        mission.road_lane_ids,mission.access_edge_index,mission.body_heading_rad,
-        mission.approach_pose,mission.position_pose,mission.exit_goal)
+    mission=mission.snapshot()
     require(mission.map_digest==facts.map_digest(),'PARKING_MISSION_MAP_MISMATCH')
     require(isinstance(vehicle_extents,(tuple,list)) and len(vehicle_extents)==3
             and all(finite(v) and v>0 for v in vehicle_extents),'PARKING_VEHICLE_EXTENTS_UNAVAILABLE')

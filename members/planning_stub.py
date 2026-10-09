@@ -7,11 +7,13 @@ from core.interfaces import DecisionTarget, Trajectory
 from members.planning.stop_behavior import StopBehaviorPlanner
 from members.planning.lane_change_behavior import LaneChangeBehaviorPlanner
 from members.planning.behavior_contract import LANE_CHANGE_ACTIONS
+from members.planning.parking_behavior import ParkingBehaviorPlanner
 
 
 _CONTROL_GEOMETRY = {}
 _BEHAVIOR_PLANNER = StopBehaviorPlanner()
 _LANE_CHANGE_PLANNER = LaneChangeBehaviorPlanner()
+_PARKING_PLANNER = ParkingBehaviorPlanner()
 
 
 def _settings_with_control_geometry():
@@ -24,17 +26,20 @@ def _settings_with_control_geometry():
     return settings
 
 
-def configure_planning(config=None,lane_change_inputs_provider=None):
+def configure_planning(config=None,lane_change_inputs_provider=None,parking_inputs_provider=None):
     """Captain supplies the same configured steering geometry as control.
 
     This is an explicit trial capability, not a claim of live calibration.
     Body extents continue to come from the shared NEVC_VEHICLE_* overrides.
     lane_change_inputs_provider is an optional captain-owned source/model
     adapter. None keeps P03 unavailable; it never advertises capabilities.
+    parking_inputs_provider similarly supplies P04's original task and model.
+    Neither provider is installed or advertised by default.
     """
-    global _CONTROL_GEOMETRY,_BEHAVIOR_PLANNER,_LANE_CHANGE_PLANNER
+    global _CONTROL_GEOMETRY,_BEHAVIOR_PLANNER,_LANE_CHANGE_PLANNER,_PARKING_PLANNER
     _BEHAVIOR_PLANNER = StopBehaviorPlanner()
     _LANE_CHANGE_PLANNER = LaneChangeBehaviorPlanner(lane_change_inputs_provider)
+    _PARKING_PLANNER = ParkingBehaviorPlanner(parking_inputs_provider)
     geometry = {}
     if config is not None and getattr(config, "control_calibrated", False):
         for name in ("wheelbase_m", "front_steer_max_rad"):
@@ -62,5 +67,7 @@ def plan(perception, decision):
         request=decision.behavior_request
         if isinstance(request,dict) and request.get('maneuver') in LANE_CHANGE_ACTIONS:
             return _LANE_CHANGE_PLANNER.plan(perception,decision,settings)
+        if isinstance(request,dict) and request.get('maneuver')=='PARK':
+            return _PARKING_PLANNER.plan(perception,decision,settings)
         return _BEHAVIOR_PLANNER.plan(perception,decision,settings)
     return build_trajectory(perception, decision, settings)

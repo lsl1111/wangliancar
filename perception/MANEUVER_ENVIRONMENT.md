@@ -4,6 +4,14 @@
 `PerceptionBuilder`、`RouteManager`、地图对象读取、目标质量检查、决策行为
 状态机、前进规划器和控制器停稳计时；三个固定入口的签名保持不变。
 
+当前 P04 交接增量已将正式车位/道路/覆盖事实、原 ParkingMission、固定规划
+入口和实际控制反馈串起，见[泊车派发](../members/planning/PARKING_DISPATCH.md)。
+复用原策略及十秒义务，保留当前来源/期限与全部车身校验；默认未安装任务/
+模型提供者或增加 PARK/REVERSE 能力。合成来源和车辆闭环通过不能补足真实
+Sensor 覆盖、通道/入口规则、车型响应、生产自动任务选择及现场验收。
+本轮新增固定泊车入口 31 项、末端直线 3 项离线回归，最终 SimOne Python
+3.6.4 完整 discover **1245 项全部通过，0 失败、0 跳过，505.105 秒**。
+
 ## 已接入的事实
 
 公共出口是 `Perception.maneuver_environment`，也随 `latest_pipeline.json`

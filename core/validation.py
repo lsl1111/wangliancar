@@ -51,9 +51,14 @@ def validate_output(value, expected, source):
             raise ValueError("invalid behavior execution identity")
         if identity is not None and not value.stop_obligation_id:
             # Moving behavior paths carry identity without a dwell duty. Keep
-            # this boundary limited to an actually acknowledged P03 stage.
+            # this boundary limited to an actually acknowledged P03/P04 stage.
             reply=value.behavior_feedback
-            if (value.hold_duration_s!=0 or identity['stage'] not in ('EXECUTE','SETTLE')
+            parking=identity['stage'] in ('APPROACH','POSITION','EXIT_PREPARE','EXIT')
+            parking_shape=(value.precision_stop and value.stop_required and value.stop_distance>=0
+                and value.motion_direction==(-1 if identity['stage']=='EXIT_PREPARE' else 1)
+                and bool(value.points) and value.points[-1].speed==0)
+            if (value.hold_duration_s!=0 or (identity['stage'] not in ('EXECUTE','SETTLE') and not parking)
+                    or (parking and not parking_shape)
                     or not isinstance(reply,dict) or reply.get('producer')!='planning'
                     or reply.get('status')!='PLANNED' or reply.get('usable') is not True
                     or any(reply.get(k)!=identity[k] for k in ('intent_id','stage','revision'))

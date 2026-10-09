@@ -196,6 +196,44 @@ class ParkingGeneratorTests(unittest.TestCase):
         self.assertFalse(result['points'])
         self.assertEqual('NO_CERTIFIED_PARKING_SEGMENT',result['reason_code'])
 
+    def test_terminal_straight_preserves_reverse_goal_and_zero_speed(self):
+        model=search(tangent_scales=(1.,1.4,2.),end_tangent_scales=(.7,1.),
+                     speed_scales=(1.,),terminal_straight_m=(2.,))
+        road=rectangle(-15.,-15.,25.,15.)
+        result=self.generate(start_pose=(10.,0.,0.),search=model,
+            access_corridor=bay_access(PARALLEL,[road,PARALLEL],3)); self.ready(result)
+        self.assertEqual(2.,result['attempts'][-1]['terminal_straight_m'])
+        points=result['points']; tail=[p for p in points if p.x<=2.+1e-9]
+        self.assertGreater(len(tail),2)
+        for p in tail:
+            self.assertAlmostEqual(0.,p.y); self.assertAlmostEqual(0.,p.heading)
+        self.assertEqual((0.,0.,0.,0.),(points[-1].x,points[-1].y,points[-1].heading,points[-1].speed))
+        for a,b in zip(points,points[1:]):
+            self.assertLessEqual(math.hypot(b.x-a.x,b.y-a.y),model.spacing_m+1e-9)
+            self.assertAlmostEqual(math.hypot(b.x-a.x,b.y-a.y),
+                .5*(a.speed+b.speed)*(b.relative_time-a.relative_time),places=10)
+
+    def test_terminal_straight_cannot_bypass_objects_visibility_or_finite_work(self):
+        model=search(tangent_scales=(1.,1.4,2.),end_tangent_scales=(.7,1.),
+                     speed_scales=(1.,),terminal_straight_m=(2.,))
+        road=rectangle(-15.,-15.,25.,15.)
+        access=bay_access(PARALLEL,[road,PARALLEL],3)
+        self.ready(self.generate(start_pose=(10.,0.,0.),search=model,access_corridor=access))
+        for changes in (dict(obstacles=[obstacle(1.,0.,length=1.,width=1.,heading=None)]),
+                        dict(coverage=CorridorRegion([rectangle(3.,-15.,25.,15.)])),
+                        dict(budget=budget(max_checks=5))):
+            result=self.generate(start_pose=(10.,0.,0.),search=model,access_corridor=access,**changes)
+            self.assertFalse(result['points'],result)
+
+    def test_terminal_candidate_family_and_point_count_remain_bounded(self):
+        for model in (search(terminal_straight_m=(-1.,)),search(terminal_straight_m=(float('nan'),)),
+                      search(terminal_straight_m=(0.,1.,2.)),
+                      search(tangent_scales=(1.,),end_tangent_scales=(1.,),speed_scales=(1.,),
+                             terminal_straight_m=(100.,),max_points=70)):
+            result=self.generate(search=model)
+            self.assertFalse(result['points'],result)
+        self.assertEqual('CANDIDATE_POINT_LIMIT',result['attempts'][0]['reason_code'])
+
 
 class ParkingFactsAndSceneTests(unittest.TestCase):
     def setUp(self):

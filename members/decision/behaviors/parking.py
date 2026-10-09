@@ -5,6 +5,7 @@ import copy
 import time
 from core.corridor_region import CorridorRegion,NumericResolution,PreparationLimit
 from core.geometry import normalize_angle
+from core.parking_mission import rear_axle_bay_goal
 from members.decision.behaviors.contract import BehaviorGoal, GoalPose, finite, require
 from members.decision.behaviors.observations import Evidence, MotionObject, polygon, inside, intersects, vehicle_footprint
 from members.decision.behaviors.session import BehaviorSession
@@ -114,11 +115,7 @@ class ParkingPolicy(object):
         return self._goal(GoalPose(*self._park_pose),-1,stage!='EXIT_PREPARE')
 
     def rear_axle_goal(self, space):
-        x = sum(p[0] for p in space.boundary) / len(space.boundary)
-        y = sum(p[1] for p in space.boundary) / len(space.boundary)
-        offset = (self.front_m - self.rear_m) / 2.0
-        return GoalPose(x - offset * math.cos(space.body_heading_rad),
-                        y - offset * math.sin(space.body_heading_rad), space.body_heading_rad)
+        return rear_axle_bay_goal(space.boundary,space.body_heading_rad,self.front_m,self.rear_m)
 
     def _body_clear(self, pose, facts, space=None):
         body = vehicle_footprint(pose, self.front_m, self.rear_m, self.half_width_m)
