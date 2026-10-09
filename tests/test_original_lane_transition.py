@@ -203,6 +203,7 @@ class OriginalLaneTransitionTests(unittest.TestCase):
         self.assertFalse(result['points'])
 
     def test_cache_does_not_change_original_source_after_sdk_lane_switch(self):
+        self._use_functional_clock()
         cache=ManeuverGeometryCache(4,1000000)
         first=self.plan(geometry_cache=cache); self.assertEqual('safe',first['status'],first)
         self.switch()
@@ -225,12 +226,33 @@ class OriginalLaneTransitionTests(unittest.TestCase):
             with self.assertRaises(ValueError,msg=change): self.read()
 
     def test_cached_geometry_cannot_borrow_new_incomplete_visibility(self):
+        self._use_functional_clock()
         cache=ManeuverGeometryCache(4,1000000)
         first=self.plan(geometry_cache=cache); self.assertEqual('safe',first['status'],first)
         self.switch()
         self.f.p.maneuver_environment.coverage_regions=[]
         result=self.plan(source_lane_id=SOURCE,fixed_goal_pose=first['target_pose'],geometry_cache=cache)
         self.assertFalse(result['points'])
+
+    def test_cached_geometry_does_not_renew_work_or_source_deadline_during_search(self):
+        self._use_functional_clock()
+        cache=ManeuverGeometryCache(4,1000000)
+        first=self.plan(geometry_cache=cache)
+        self.assertEqual('safe',first['status'],first)
+        self.switch()
+        from members.planning import lane_change_generator as generator
+        original=generator.generate_lane_change
+        for lifetime,elapsed,reason in ((.01,.02,'BUDGET_EXHAUSTED'),
+                                        (5.,.21,'MANEUVER_FRAME_EXPIRED_OR_MISMATCHED')):
+            work=budget(max_checks=1000000,deadline_monotonic_s=self.f.now+lifetime)
+            def consume_time(*args,**kwargs):
+                self.f.now+=elapsed
+                return original(*args,**kwargs)
+            with patch.object(generator,'generate_lane_change',side_effect=consume_time):
+                result=self.plan(source_lane_id=SOURCE,fixed_goal_pose=first['target_pose'],
+                                 geometry_cache=cache,budget=work)
+            self.assertFalse(result['points'],result)
+            self.assertEqual(reason,result['reason_code'],result)
 
     def test_new_unknown_yaw_object_is_checked_after_sdk_lane_switch(self):
         self.switch(); self.f.p.targets=[target(25.,3.5,heading=None)]; self.update()
@@ -312,11 +334,14 @@ class OriginalLaneTransitionTests(unittest.TestCase):
         result=self.plan(source_lane_id=SOURCE,fixed_goal_pose=(35.,3.5,math.pi))
         self.assertEqual('safe',result['status'],result)
 
-    def test_generated_replans_and_real_controller_cross_sdk_identity_boundary(self):
+    def _use_functional_clock(self):
         virtual_clock=patch('time.monotonic',self.f.clock)
         virtual_clock.start(); self.addCleanup(virtual_clock.stop)
-        # This is a functional closed-loop model in virtual time. Production
-        # wall-clock exhaustion is tested separately at each native query.
+        # Functional source/model assertions use the same virtual time.
+        # Expiry during search and native-query deadlines are separate tests.
+
+    def test_generated_replans_and_real_controller_cross_sdk_identity_boundary(self):
+        self._use_functional_clock()
         calibration=control_vehicle()
         geometry=vehicle(3.9,.9,.9,calibration.wheelbase_m)
         motion=limits(max_front_steer_rad=calibration.front_steer_max_rad)

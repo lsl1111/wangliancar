@@ -1,5 +1,10 @@
 # 候选轨迹校验基础（L0 / P02）
 
+整车并集几何的实现现共享于 [core/corridor_region.py](../../core/corridor_region.py)，
+原 [规划 import](corridor_region.py) 保持类型兼容；P02 连续扫掠继续使用同一
+精确拓扑和距离引擎。决策的[正式泊车读取](../decision/PARKING_EXECUTION.md)
+也复用其受预算限制的整车查询，不复制算法、不改变现有轨迹检查或路权边界。
+
 当前增量基于包含 PR #20/#21 的 main `aa65aeb`，2026-10-09。实现位于 [candidate_validation.py](candidate_validation.py)，是规划内部可复用组件，不生成路径、不决定路权或车位、不发送控制。生产 `plan` 尚未接入；不能据此将全部 P02 或任何换道/泊车行为标为完成。
 
 ## 显式输入与输出

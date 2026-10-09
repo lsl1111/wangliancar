@@ -231,14 +231,14 @@ class CorridorRegionTests(unittest.TestCase):
         # Suppress the approximate preliminary helper to verify that exact
         # union compilation independently rejects non-adjacent intersections.
         ring=[(0.,0.),(2.,2.),(0.,2.),(3.,0.)]
-        with patch('members.planning.corridor_region.simple_outline',side_effect=lambda raw,**kw:list(raw)):
+        with patch('core.corridor_region.simple_outline',side_effect=lambda raw,**kw:list(raw)):
             result=check([ring])
         self.assertEqual('invalid',result['status'],result)
         self.assertIn('exact region self intersection',result['details']['message'])
 
     def test_exact_validation_rejects_adjacent_backtracking(self):
         ring=[(0.,0.),(10.,0.),(5.,0.),(10.,5.),(0.,5.)]
-        with patch('members.planning.corridor_region.simple_outline',side_effect=lambda raw,**kw:list(raw)):
+        with patch('core.corridor_region.simple_outline',side_effect=lambda raw,**kw:list(raw)):
             result=check([ring])
         self.assertEqual('invalid',result['status'],result)
         self.assertIn('exact adjacent region edges overlap',result['details']['message'])

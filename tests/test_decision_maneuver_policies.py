@@ -212,32 +212,38 @@ class ManeuverPolicyTests(unittest.TestCase):
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f)).request
         self.assertEqual("POSITION",r.stage)
         f=frame(4,0.3)
+        f.ego_x=15.
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="ARRIVED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=GoalPose(15,0,0),progress=1)).request
         self.assertEqual("REVERSE_ENTRY",r.stage)
         self.assertEqual(-1,r.goal.motion_direction)
         obligation=r.goal.stop_obligation_id
         f=frame(5,0.4)
+        f.ego_x=policy.park_goal.x
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="ARRIVED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=policy.park_goal,progress=1)).request
         self.assertEqual("PARKED_DWELL",r.stage)
         self.assertEqual(obligation,r.goal.stop_obligation_id)
         f=frame(6,0.5)
+        f.ego_x=policy.park_goal.x
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="COMPLETED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=policy.park_goal,
              progress=1,hold_completed=True,standstill_duration_s=9)).request
         self.assertEqual("PARKED_DWELL",r.stage)
         f=frame(7,0.6)
+        f.ego_x=policy.park_goal.x
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="COMPLETED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=policy.park_goal,
              progress=1,hold_completed=True,standstill_duration_s=10)).request
         self.assertEqual("EXIT_PREPARE",r.stage)
         f=frame(8,0.7)
+        f.ego_x=policy.park_goal.x
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="ARRIVED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=policy.park_goal)).request
         self.assertEqual("EXIT",r.stage)
         self.assertEqual(1,r.goal.motion_direction)
         f=frame(9,0.8)
+        f.ego_x=25.
         r=policy.evaluate(f,parking(f),caps(f),feedback(r,f,producer="control",status="ARRIVED",
              goal_pose_arrived=True,actual_standstill_confirmed=True,actual_pose=GoalPose(25,0,0),progress=1)).request
         self.assertEqual("COMPLETED",r.status)
@@ -276,6 +282,7 @@ class ManeuverPolicyTests(unittest.TestCase):
         self.assertIs(original_goal, policy.park_goal)
         self.assertGreater(recovered.request.goal.speed_cap_mps, 0)
         f = frame(4, 0.3)
+        f.ego_x=original_goal.x
         arrived = policy.evaluate(f, parking(f), caps(f), feedback(recovered.request, f,
             producer="control", status="ARRIVED", actual_standstill_confirmed=True,
             goal_pose_arrived=True, actual_pose=original_goal, progress=1))
@@ -325,6 +332,7 @@ class ManeuverPolicyTests(unittest.TestCase):
         self.assertEqual("PARKED_DWELL", held.request.stage)
         self.assertTrue(held.hold_required)
         f = frame(3, 0.2)
+        f.ego_x=goal.x
         completed = policy.evaluate(f, parking(f), caps(f), feedback(held.request, f,
             producer="control", status="COMPLETED", actual_standstill_confirmed=True,
             goal_pose_arrived=True, actual_pose=goal, progress=1,
