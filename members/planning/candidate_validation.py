@@ -15,7 +15,7 @@ import time
 
 from core.geometry import normalize_angle
 from core.validation import number
-from members.planning.corridor_region import CorridorRegion,NumericResolution
+from members.planning.corridor_region import CorridorRegion,NumericResolution,PreparationLimit
 
 
 EPS = 1e-9
@@ -438,11 +438,17 @@ def validate_candidate(points, motion_direction, vehicle, limits, corridor, obst
                       details={"segment_count": len(segments), "validated_horizon_s": horizon})
         if isinstance(corridor,CorridorRegion):
             report['details'].update(region_count=len(planes.polygons),exterior_edge_count=planes.edge_count)
+    except PreparationLimit as error:
+        report.update(status='inconclusive',reason_code='REGION_PREPARATION_LIMIT',
+                      constraint='region_topology',details={'message':str(error)})
     except NumericResolution as error:
         report.update(status='inconclusive',reason_code='REGION_NUMERIC_RESOLUTION',
                       constraint='region_topology',details={'message':str(error)})
     except _Stop as stop:
         report.update(status=stop.status, reason_code=stop.code, constraint=stop.constraint, details=stop.details)
+        if (stop.code=='BUDGET_EXHAUSTED' and isinstance(corridor,CorridorRegion)
+                and corridor.preparation_max_checks is not None and corridor._prepared is None):
+            report['details'].update(preparation_complete=False,preparation_checks=corridor._job_steps)
     except (ValueError, TypeError, AttributeError, OverflowError, ZeroDivisionError) as exc:
         report.update(status="invalid", reason_code="INVALID_INPUT", constraint="input", details={"message": str(exc)})
     report["checks"] = checks.count if checks is not None else 0
