@@ -1,18 +1,22 @@
-"""Reuse D01 policies through the optional captain-owned runtime channel."""
+"""Reuse D01 policies and read local R06 facts through the runtime channel."""
+
+import time
 
 from core.traffic_quality import signal_stop_requirement, traffic_usable
 from core.validation import number
 from members.decision.behaviors.contract import TaskContext, BehaviorFrame
 from members.decision.behaviors.session import BehaviorSession
 from core.behavior_channel import read_channel
+from core.maneuver_facts import ManeuverFacts
+from members.decision.behaviors.environment import lane_candidates
 from members.decision.behaviors.stop_policies import (
     SignalDwellPolicy, SignalStopObservation, BlockedRoadPolicy, BlockingObservation,
 )
 
 
 class BehaviorCoordinator(object):
-    def __init__(self, settings):
-        self.settings = settings
+    def __init__(self, settings, clock=None):
+        self.settings, self.clock = settings, clock or time.monotonic
         self._generation = 0
         self.reset()
 
@@ -28,6 +32,7 @@ class BehaviorCoordinator(object):
         self.blocked = BlockedRoadPolicy(self.settings.release_frames, self._session())
         self._signal_seen = set()
         self._runtime_context = None
+        self._blockage_anchor = None
         self._latest = dict(interface_status="proposal_not_runtime_connected", requests=[],
                             dependencies=["R05_EXECUTION_FEEDBACK", "R07_BEHAVIOR_GOAL_CHANNEL"],
                             frame_id=-1)
@@ -81,6 +86,12 @@ class BehaviorCoordinator(object):
                               perception.ego.x, perception.ego.y, perception.ego.heading,
                               perception.ego.speed, usable=True)
         requests, policy_states = [], []
+        environment = dict(usable=False, lane_candidates=[], reason='MANEUVER_ENVIRONMENT_UNAVAILABLE')
+        try:
+            candidates, failures = lane_candidates(perception, frame, self.clock)
+            environment = dict(usable=True, lane_candidates=[c.lane_id for c in candidates], failures=failures)
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError, OverflowError) as error:
+            environment['reason'] = str(error)
         # Scene IDs select the supplied stop/light duty only; geometry and
         # collision/stop determination are still the existing shared facts.
         signal = self.signal.evaluate(frame, self._signal_observation(perception, output),
@@ -109,9 +120,27 @@ class BehaviorCoordinator(object):
             identifier, distance = min(constraints.blockage_candidates, key=lambda item: (item[1], item[0]))
             obstruction = BlockingObservation("target:" + str(identifier), distance, True,
                                                speed_cap_mps=output.target_speed)
+            target = next((v for v in perception.targets if v.id == identifier and v.valid), None)
+            digest = None
+            try:
+                digest = ManeuverFacts(perception, self.clock).map_digest()
+            except (ValueError, TypeError, AttributeError, KeyError):
+                pass
+            self._blockage_anchor = ((frame.context.key(), perception.lane.lane_id, (target.x, target.y, target.z), digest)
+                                     if target is not None else None)
         if obstruction is None and self.blocked.session.intent_id:
-            # A legacy empty frame is not verified full-corridor clearance.
             obstruction = BlockingObservation("prior", None, False, usable=False)
+            try:
+                if (self._blockage_anchor is not None and self._blockage_anchor[0] == frame.context.key()
+                        and self._blockage_anchor[3] is not None):
+                    facts = ManeuverFacts(perception, self.clock)
+                    if facts.map_digest() == self._blockage_anchor[3]:
+                        clear = facts.road_clear_at(*self._blockage_anchor[1:3])
+                        obstruction = BlockingObservation('prior', None, False, verified_clear=clear,
+                            source=perception.target_source, source_frame_id=perception.targets_frame_id,
+                            source_observed_at_s=facts.env.dynamic_observed_at_s)
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError):
+                pass
         blockage = self.blocked.evaluate(frame, obstruction,
                                          capabilities=capabilities,feedback=reply(self.blocked.session),
                                          safety_override=output.mode == "EMERGENCY_BRAKE")
@@ -120,6 +149,7 @@ class BehaviorCoordinator(object):
             requests.append(blockage.request.to_dict())
         self._latest = dict(interface_status="runtime_connected" if connected else "proposal_not_runtime_connected", frame_id=perception.frame_id,
                             requests=requests, policies=policy_states,
+                            maneuver_environment=environment,
                             dependencies=([] if connected else ["R05_EXECUTION_FEEDBACK", "R07_BEHAVIOR_GOAL_CHANNEL",
                                           "DOWNSTREAM_CAPABILITIES"]))
 

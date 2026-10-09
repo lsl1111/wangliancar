@@ -1,7 +1,7 @@
 """D03 decision strategy: legal corridor, front/rear gap and actual settlement."""
 
 import math
-from core.geometry import project_polyline, normalize_angle
+from core.geometry import project_polyline, normalize_angle, projection_within_polyline
 from members.decision.behaviors.contract import BehaviorGoal, GoalPose, LightIntent, finite, require
 from members.decision.behaviors.observations import Evidence, MotionObject, vehicle_footprint, corridor_contains
 from members.decision.behaviors.session import BehaviorSession
@@ -11,7 +11,8 @@ from members.decision.behaviors.stop_policies import PolicyResult
 class LaneCandidate(object):
     def __init__(self, lane_id, side, center_line, width_m, shared_marking,
                  crossing_allowed, same_direction, evidence, rear_coverage_verified,
-                 objects=(), left_boundary=None, right_boundary=None):
+                 objects=(), left_boundary=None, right_boundary=None,
+                 crossing_boundary=None, crossing_ranges=None):
         require(isinstance(lane_id, str) and bool(lane_id) and side in ("left", "right"), "invalid candidate lane")
         require(isinstance(center_line, (list, tuple)) and 2 <= len(center_line) <= 20000
                 and all(isinstance(p, (list, tuple)) and len(p) == 2
@@ -26,6 +27,14 @@ class LaneCandidate(object):
                     and all(isinstance(p, (list, tuple)) and len(p) == 2 and all(finite(v) for v in p)
                             for p in boundary)), "invalid candidate boundary")
         self.left_boundary, self.right_boundary = left_boundary, right_boundary
+        require((crossing_boundary is None) == (crossing_ranges is None), 'crossing scope pair required')
+        if crossing_boundary is not None:
+            require(isinstance(crossing_ranges, (list, tuple)), 'invalid crossing ranges')
+            for line in [crossing_boundary] + list(crossing_ranges):
+                require(isinstance(line, (list, tuple)) and 2 <= len(line) <= 20000
+                        and all(isinstance(p, (list, tuple)) and len(p) == 2 and all(finite(v) for v in p)
+                                for p in line), 'invalid crossing scope geometry')
+        self.crossing_boundary, self.crossing_ranges = crossing_boundary, crossing_ranges
         self.evidence, self.rear_coverage_verified, self.objects = evidence, rear_coverage_verified, tuple(objects)
 
 
@@ -58,6 +67,22 @@ class LaneChangePolicy(object):
             return False, "CROSSING_ILLEGAL_OR_OPPOSITE"
         if candidate.width_m < 2 * self.half_width_m:
             return False, "TARGET_LANE_TOO_NARROW"
+        if candidate.crossing_boundary is not None:
+            boundary = candidate.crossing_boundary
+            anchor = project_polyline(boundary, frame.ego_x, frame.ego_y)
+            if not projection_within_polyline(anchor, len(boundary)):
+                return False, 'CROSSING_LOCAL_WINDOW_UNAVAILABLE'
+            reach = math.hypot(max(self.front_m, self.rear_m), self.half_width_m)
+            low, high = anchor['s'] - reach, anchor['s'] + frame.ego_speed * self.duration + reach
+            intervals = []
+            for line in candidate.crossing_ranges:
+                start, end = project_polyline(boundary, *line[0]), project_polyline(boundary, *line[-1])
+                if start is not None and end is not None:
+                    intervals.append((start['s'], end['s']))
+            # This preliminary opportunity window never substitutes for the
+            # planner's actual continuous whole-body boundary crossing test.
+            if not any(a <= low and high <= b for a,b in intervals):
+                return False, 'CROSSING_MANEUVER_WINDOW_UNVERIFIED'
         ego = project_polyline(candidate.center_line, frame.ego_x, frame.ego_y)
         if ego is None or abs(normalize_angle(ego["heading"] - frame.ego_heading)) >= math.pi / 2:
             return False, "CANDIDATE_DIRECTION_UNVERIFIED"
@@ -72,11 +97,13 @@ class LaneChangePolicy(object):
             proj = project_polyline(candidate.center_line, obj.x, obj.y)
             if proj is None:
                 return False, "TARGET_LANE_OBJECT_PROJECTION_UNKNOWN"
-            if proj["distance"] > candidate.width_m / 2 + obj.width / 2:
+            extent = 0.5 * math.hypot(obj.length, obj.width)
+            angle = None if obj.heading is None else obj.heading - proj['heading']
+            lateral = extent if angle is None else .5*(obj.length*abs(math.sin(angle))+obj.width*abs(math.cos(angle)))
+            if proj["distance"] > candidate.width_m / 2 + lateral:
                 continue
             rel = proj["s"] - ego["s"]
             velocity = math.cos(proj["heading"]) * obj.vx + math.sin(proj["heading"]) * obj.vy
-            extent = 0.5 * math.hypot(obj.length, obj.width)
             uncertainty = 0.5 * self.uncertainty * self.duration ** 2
             if rel >= 0:
                 available = rel - extent - self.front_m

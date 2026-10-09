@@ -86,13 +86,20 @@ def corridor_contains(body, left_boundary, right_boundary):
 class MotionObject(object):
     def __init__(self, identifier, x, y, vx, vy, length, width, heading=0.0):
         require(type(identifier) is int and identifier >= 0
-                and all(finite(v) for v in (x, y, vx, vy, length, width, heading))
+                and all(finite(v) for v in (x, y, vx, vy, length, width))
+                and (heading is None or finite(heading))
                 and min(length, width) > 0, "invalid motion object")
         self.identifier, self.x, self.y, self.vx, self.vy = identifier, x, y, vx, vy
         self.length, self.width, self.heading = length, width, heading
 
     def footprint(self, time_s=0.0, margin=0.0):
         require(finite(time_s) and time_s >= 0 and finite(margin) and margin >= 0, "invalid prediction range")
+        if self.heading is None:
+            # An axis-aligned square encloses the bounding circle for every
+            # possible body orientation; zero is its envelope orientation.
+            radius = .5 * math.hypot(self.length, self.width) + margin
+            return vehicle_footprint(GoalPose(self.x+self.vx*time_s, self.y+self.vy*time_s, 0.),
+                                     radius, radius, radius)
         return vehicle_footprint(GoalPose(self.x+self.vx*time_s, self.y+self.vy*time_s, self.heading),
                                  self.length/2+margin, self.length/2+margin, self.width/2+margin)
 

@@ -40,7 +40,7 @@ class DecisionEngine(object):
         if hasattr(self, "_behavior"):
             self._behavior.reset()
         else:
-            self._behavior = BehaviorCoordinator(self.settings)
+            self._behavior = BehaviorCoordinator(self.settings, self._clock)
         self._last_constraints = None
         self._blind_fault_count = 0
         self._blind_stop = False
