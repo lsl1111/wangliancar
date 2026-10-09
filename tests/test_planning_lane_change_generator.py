@@ -187,6 +187,12 @@ class LaneChangeGeneratorTests(unittest.TestCase):
         self.assertFalse(result['points'])
         self.assertEqual('TARGET_TANGENT_AT_CORNER_UNKNOWN',result['attempts'][0]['reason_code'])
 
+    def test_frozen_goal_cannot_select_one_tangent_at_a_changed_corner(self):
+        result=self.run_search(target_reference=[(0.,3.5),(35.,3.5),(60.,10.)],
+                               fixed_goal_pose=(35.,3.5,0.))
+        self.assertFalse(result['points'])
+        self.assertEqual('TARGET_TANGENT_AT_CORNER_UNKNOWN',result['reason_code'])
+
     def test_curved_lane_uses_actual_start_yaw_and_nominal_curvature(self):
         def arc(radius):
             return tuple((radius*math.cos(-.2+i*.06),radius*math.sin(-.2+i*.06),0.) for i in range(21))
@@ -196,14 +202,25 @@ class LaneChangeGeneratorTests(unittest.TestCase):
         permission=((encode_position(0,Fraction(0)),encode_position(19,Fraction(1))),)
         region=CrossingCorridor(polygons,(left,right,'left',permission),1000000)
         reference=arc(96.5)
-        result=self.run_search(start_pose=(100.,0.,math.pi/2),initial_curvature_m_inv=.01,
+        options=dict(start_pose=(100.,0.,math.pi/2),initial_curvature_m_inv=.01,
             target_reference=reference,crossing_corridor=region,
             target_corridor=CorridorRegion([polygons[1]]),
             coverage=CorridorRegion([rectangle(40.,-30.,120.,110.)]),search=search(distances_m=(24.,)))
+        result=self.run_search(**options)
         self.assert_ready(result)
         self.assertEqual(math.pi/2,result['points'][0].heading)
         self.assertGreater(result['points'][-1].heading,math.pi/2)
         self.assertLess(result['points'][-1].x,100.)
+        # Replan on the curve from a later actual pose while keeping the
+        # selected endpoint and its original tangent, rather than advancing it.
+        index=len(result['points'])//3
+        a,b=result['points'][index:index+2]
+        curvature=(b.heading-a.heading)/math.hypot(b.x-a.x,b.y-a.y)
+        options.update(start_pose=(a.x,a.y,a.heading),initial_speed_mps=a.speed,
+                       initial_curvature_m_inv=curvature,fixed_goal_pose=result['target_pose'])
+        replanned=self.run_search(**options)
+        self.assert_ready(replanned)
+        self.assertEqual(result['target_pose'],replanned['target_pose'])
 
     def test_terminal_body_must_fit_target_lane_separately_from_union(self):
         result=self.run_search(target_corridor=CorridorRegion([rectangle(0.,3.,100.,4.)]))

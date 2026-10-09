@@ -40,18 +40,23 @@ class ManeuverGeometryCache(object):
         return self._entries[key]
 
 
-def read_maneuver_scene(perception, lane_ids, clock=None, geometry_cache=None):
+def read_maneuver_scene(perception, lane_ids, clock=None, geometry_cache=None, source_lane_id=None):
     require(isinstance(lane_ids, (list, tuple)) and 1 <= len(lane_ids) <= 3
             and all(isinstance(v, str) and v for v in lane_ids)
             and len(lane_ids) == len(set(lane_ids)), 'MANEUVER_PLANNING_LANE_SET_INVALID')
     facts = ManeuverFacts(perception, clock)
     allowed = [perception.lane.lane_id] + facts.neighbors()
     require(all(v in allowed for v in lane_ids), 'MANEUVER_PLANNING_LANE_UNAVAILABLE')
+    require(source_lane_id is None or (len(lane_ids)==2 and source_lane_id in lane_ids
+            and perception.lane.lane_id in lane_ids), 'MANEUVER_ORIGINAL_LANE_PAIR_UNAVAILABLE')
     objects, roads, crossings = facts.objects(), [], []
     for lane_id in lane_ids:
         roads.append(facts.road(lane_id, require_coverage=False))
-        if lane_id != perception.lane.lane_id:
+        if source_lane_id is None and lane_id != perception.lane.lane_id:
             crossings.append(facts.crossing(lane_id))
+    if source_lane_id is not None:
+        target=next(v for v in lane_ids if v!=source_lane_id)
+        crossings.append(facts.crossing(target,source_lane_id))
     raw = [p for road in roads for name in ('center_line', 'left_boundary', 'right_boundary') for p in road[name]]
     views = facts.coverage(raw)
     require(bool(views), 'MANEUVER_PLANNING_COVERAGE_UNAVAILABLE')

@@ -180,6 +180,9 @@ class ManeuverEnvironmentBuilder(object):
                 for neighbor in env.neighbor_lanes:
                     if neighbor.get("marking_map_digest"):
                         neighbor["marking_evidence"] = _evidence(env,"sdk_matched_opendrive","map",False)
+                    prior=neighbor.get('crossing_to_current')
+                    if isinstance(prior,dict) and prior.get('marking_map_digest'):
+                        prior['marking_evidence']=_evidence(env,'sdk_matched_opendrive','map',False)
                 for junction in env.junctions:
                     junction["evidence"] = _evidence(env,"sdk_matched_opendrive","map",False)
             except Exception as exc:

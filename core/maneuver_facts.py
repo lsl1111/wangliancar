@@ -253,10 +253,26 @@ class ManeuverFacts(object):
                     map_digest=digest,evidence=evidence,coverage=views,
                     objects=objects,occupancy='empty',authority='bay_geometry_and_current_occupancy_only')
 
-    def crossing(self, lane_id):
+    def crossing(self, lane_id, source_lane_id=None):
         digest = self.map_digest()
-        _require(lane_id in self.neighbors(), 'MANEUVER_NEIGHBOR_UNAVAILABLE')
-        value = next(v for v in self.env.neighbor_lanes if v['lane_id'] == lane_id)
+        source_lane_id=self.p.lane.lane_id if source_lane_id is None else source_lane_id
+        if source_lane_id==self.p.lane.lane_id:
+            _require(lane_id in self.neighbors(), 'MANEUVER_NEIGHBOR_UNAVAILABLE')
+            value = next(v for v in self.env.neighbor_lanes if v['lane_id'] == lane_id)
+            source_borders=dict(left=self.p.lane.left_boundary,right=self.p.lane.right_boundary)
+        else:
+            _require(lane_id==self.p.lane.lane_id and source_lane_id in self.neighbors(),
+                     'MANEUVER_ORIGINAL_LANE_PAIR_UNAVAILABLE')
+            source=next(v for v in self.env.neighbor_lanes if v['lane_id']==source_lane_id)
+            value=source.get('crossing_to_current')
+            _require(source.get('geometry_valid') is True and source.get('same_direction') is True
+                     and source.get('side') in ('left','right') and isinstance(value,dict)
+                     and value.get('source_lane_id')==source_lane_id and value.get('lane_id')==lane_id
+                     and value.get('side')==('left' if source['side']=='right' else 'right')
+                     and native_points3(value.get('left_boundary'))==native_points3(self.p.lane.left_boundary)
+                     and native_points3(value.get('right_boundary'))==native_points3(self.p.lane.right_boundary),
+                     'MANEUVER_ORIGINAL_CROSSING_SOURCE_UNAVAILABLE')
+            source_borders=dict(left=source['left_boundary'],right=source['right_boundary'])
         _require(all(value.get(k) is True for k in ('geometry_valid', 'shared_boundary_verified',
                     'same_direction', 'crossing_range_verified', 'crossing_geometry_bound',
                     'travel_direction_verified', 'travel_matches_declared_direction'))
@@ -268,17 +284,17 @@ class ManeuverFacts(object):
                  'MANEUVER_CROSSING_WINDOW_UNVERIFIED')
         boundary = _points(window.get('shared_boundary_world'), 3)
         _require(window.get('source_lineage_model')=='native_edge_rational_v1'
-                 and window.get('source_lane_id')==self.p.lane.lane_id
+                 and window.get('source_lane_id')==source_lane_id
                  and window.get('source_boundary_side')==value['side'],
                  'MANEUVER_CROSSING_SOURCE_LINEAGE_UNAVAILABLE')
         native=_points(window.get('source_boundary_world'),3)
-        original=native_points3(self.p.lane.left_boundary if value['side']=='left' else self.p.lane.right_boundary)
+        original=native_points3(source_borders[value['side']])
         _require(tuple(native)==original,'MANEUVER_CROSSING_NATIVE_SOURCE_MISMATCH')
         closed=window.get('source_lane_boundaries')
         _require(isinstance(closed,dict),'MANEUVER_CROSSING_SOURCE_PERIMETER_UNAVAILABLE')
         borders={name:_points(closed.get(name),3) for name in ('left','right')}
-        _require(tuple(borders['left'])==native_points3(self.p.lane.left_boundary)
-                 and tuple(borders['right'])==native_points3(self.p.lane.right_boundary)
+        _require(tuple(borders['left'])==native_points3(source_borders['left'])
+                 and tuple(borders['right'])==native_points3(source_borders['right'])
                  and borders[value['side']]==native,'MANEUVER_CROSSING_NATIVE_SOURCE_MISMATCH')
         source_positions=window.get('source_positions')
         _require(isinstance(source_positions,list) and len(source_positions)==len(boundary),
@@ -326,7 +342,7 @@ class ManeuverFacts(object):
             count += len(fragment)
             _require(count <= 40000, 'MANEUVER_CROSSING_RANGES_INVALID')
         self._fresh()
-        return dict(lane_id=lane_id, side=value['side'], shared_boundary_world=boundary,
+        return dict(lane_id=lane_id, source_lane_id=source_lane_id, side=value['side'], shared_boundary_world=boundary,
                     source_boundary_world=native,source_positions=[tuple(v) for v in source_positions],
                     source_lane_boundaries=borders,
                     permitted_source_positions=permitted_positions,source_lineage_model=window['source_lineage_model'],

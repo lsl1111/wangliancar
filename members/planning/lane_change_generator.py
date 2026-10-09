@@ -136,7 +136,7 @@ def _parameters(start, speed, curvature, cap, vehicle, limits, search, budget):
              'SEARCH_BOUNDS_INVALID')
 
 
-def _reference(raw, start, ambiguity, vehicle, work):
+def _reference(raw, start, ambiguity, vehicle, work, return_projection=False):
     _require(isinstance(raw, (list, tuple)) and 2 <= len(raw) <= 20000,
              'TARGET_REFERENCE_UNAVAILABLE')
     points, stations, projections = [], [0.], []
@@ -167,9 +167,12 @@ def _reference(raw, start, ambiguity, vehicle, work):
         _require(candidate['distance'] > nearest['distance']+ambiguity
                  or abs(candidate['s']-nearest['s']) <= vehicle.front_offset_m+vehicle.rear_offset_m,
                  'TARGET_REFERENCE_BRANCH_AMBIGUOUS')
+        if return_projection and candidate['distance']<=EPS:
+            _require(abs(normalize_angle(candidate['heading']-nearest['heading']))<=EPS,
+                     'TARGET_TANGENT_AT_CORNER_UNKNOWN')
     _require(abs(normalize_angle(nearest['heading']-start[2])) < math.pi/2,
              'TARGET_REFERENCE_OPPOSITE_DIRECTION')
-    return points, stations, nearest['s']
+    return points, stations, nearest if return_projection else nearest['s']
 
 
 def _goal(reference, stations, station, work):
@@ -286,7 +289,7 @@ def _timed(shape, lengths, initial, desired, cap, curvature, vehicle, limits, wo
 def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
                          target_reference, speed_cap_mps, vehicle, limits,
                          crossing_corridor, coverage, obstacles, search, budget,
-                         target_corridor):
+                         target_corridor, fixed_goal_pose=None):
     """Return the first certified candidate in explicit deterministic order.
 
     Independent sweeps and target-body containment share one budget/deadline. An output is
@@ -306,13 +309,21 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
         _require(target_corridor is not None, 'TARGET_LANE_REGION_REQUIRED')
         reference, stations, origin = _reference(target_reference, start_pose,
                                                 search.projection_ambiguity_m, vehicle, work)
-        for distance in search.distances_m:
+        if fixed_goal_pose is not None:
+            _require(isinstance(fixed_goal_pose,(tuple,list)) and len(fixed_goal_pose)==3
+                     and all(number(v) for v in fixed_goal_pose),'FROZEN_LANE_CHANGE_GOAL_INVALID')
+            unused,unused,projection=_reference(reference,fixed_goal_pose,
+                search.projection_ambiguity_m,vehicle,work,return_projection=True)
+            _require(projection['distance']<=EPS and projection['s']>origin
+                     and abs(normalize_angle(projection['heading']-fixed_goal_pose[2]))<=EPS,
+                     'FROZEN_LANE_CHANGE_GOAL_OUTSIDE_CURRENT_REFERENCE')
+        for distance in ((None,) if fixed_goal_pose is not None else search.distances_m):
             for scale in search.tangent_scales:
                 for speed_scale in search.speed_scales:
                     work.step()
                     attempt = dict(distance_m=distance, tangent_scale=scale, speed_scale=speed_scale)
                     try:
-                        goal = _goal(reference, stations, origin+distance, work)
+                        goal = tuple(fixed_goal_pose) if fixed_goal_pose is not None else _goal(reference, stations, origin+distance, work)
                         shape, lengths = _shape(start_pose, goal, initial_curvature_m_inv, scale, search, work)
                         points = _timed(shape, lengths, initial_speed_mps, speed_cap_mps*speed_scale,
                                         speed_cap_mps, initial_curvature_m_inv, vehicle, limits, work)
@@ -367,23 +378,28 @@ def generate_lane_change(start_pose, initial_speed_mps, initial_curvature_m_inv,
 
 def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_inv,
                                speed_cap_mps, vehicle, limits, search, budget,
-                               prediction_envelopes, clock=None, geometry_cache=None):
+                               prediction_envelopes, clock=None, geometry_cache=None,
+                               source_lane_id=None, fixed_goal_pose=None):
     """Use formal current perception; preserve original Sensor age/deadlines.
 
     Per-object PredictionEnvelope values are explicit and cover the original
     object set. An observed empty set still requires actual complete visibility.
-    Current source lane only: active-lane identity transitions need the behavior
-    session integration before this component can be dispatched in production.
+    An active caller retains its original source and frozen goal. The refreshed
+    original crossing direction is required after SDK current-lane changes;
+    neither reverse permission nor a newly advancing endpoint substitutes.
     """
     clock = clock or time.monotonic
     try:
-        source_lane_id = perception.lane.lane_id
+        current_lane_id=perception.lane.lane_id
+        source_lane_id=current_lane_id if source_lane_id is None else source_lane_id
         _require(all(number(v) for v in (perception.ego.vx,perception.ego.vy,perception.ego.speed))
                  and not opposes_direction(perception.ego.vx,perception.ego.vy,
                                             perception.ego.heading,perception.ego.speed),
                  'ACTUAL_MOTION_OPPOSES_FORWARD_LANE_CHANGE')
         _require(target_lane_id != source_lane_id, 'TARGET_ALREADY_CURRENT_LANE')
-        scene = read_maneuver_scene(perception, (source_lane_id, target_lane_id), clock, geometry_cache)
+        _require(current_lane_id==source_lane_id or fixed_goal_pose is not None,
+                 'FROZEN_LANE_CHANGE_GOAL_REQUIRED')
+        scene = read_maneuver_scene(perception, (source_lane_id, target_lane_id), clock, geometry_cache,source_lane_id)
         now = clock()
         predictions = _source_predictions(scene['objects'],prediction_envelopes,now)
         facts = ManeuverFacts(perception, clock)
@@ -402,9 +418,9 @@ def plan_lane_change_candidate(perception, target_lane_id, initial_curvature_m_i
         result = generate_lane_change((perception.ego.x, perception.ego.y, perception.ego.heading),
             perception.ego.speed, initial_curvature_m_inv, target['center_line'], speed_cap_mps,
             vehicle, limits, scene['legal_crossing_corridor'], scene['coverage'], predictions, search, effective,
-            target_region)
+            target_region,fixed_goal_pose)
         facts.check_current(True)
-        _require(perception.lane.lane_id==source_lane_id and facts.map_digest()==scene['map_digest'],
+        _require(perception.lane.lane_id==current_lane_id and facts.map_digest()==scene['map_digest'],
                  'LANE_CHANGE_SOURCE_IDENTITY_CHANGED_DURING_SEARCH')
         _require(clock() < scene['source_valid_until_s'], 'LANE_CHANGE_SOURCE_EXPIRED_DURING_SEARCH')
         result.update(target_lane_id=target_lane_id, source_lane_id=source_lane_id,

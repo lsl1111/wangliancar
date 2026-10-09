@@ -3,6 +3,7 @@ import copy
 import math
 
 from core.geometry import project_polyline
+from core.interfaces import LaneContext
 from core.route_segments import verified_spans
 from perception.opendrive_semantics import OpenDriveSemantics,lane_identity
 from perception.crossing_ranges import CrossingRanges
@@ -45,6 +46,7 @@ class ManeuverMap(object):
 
     def observe(self,ego,lane,neighbors):
         for item in neighbors:
+            item.pop('crossing_to_current',None)
             item.update(marking_intervals_road_s=[],marking_semantics_verified=False,
                         crossing_range_verified=False,crossing_geometry_bound=False,
                         travel_direction_verified=False,travel_matches_declared_direction=False,
@@ -70,14 +72,46 @@ class ManeuverMap(object):
                             coordinate_system="opendrive_road_s")
             for item in neighbors:
                 self._markings(item,lane,road_s)
+            prior_sources=self._prior_sources(lane,neighbors,road_s)
             metadata["boundary_binding_budget"] = self.crossing_ranges.observe(
-                ego,lane,neighbors,self.document,self.digest,hdmap)
+                ego,lane,neighbors,self.document,self.digest,hdmap,prior_sources)
             metadata["road_regions"] = self.road_regions.observe(ego,lane,neighbors,self.document,self.digest)
         except (AttributeError,ValueError,TypeError,KeyError,IndexError,OverflowError,RuntimeError):
             metadata.update(geometry_bound=False,geometry_reason="ROAD_S_OR_LANE_SECTION_UNVERIFIED")
         return metadata,self._junctions(ego,lane,metadata.get("geometry_bound") is True)
 
-    def _markings(self,item,lane,road_s):
+    def _prior_sources(self,lane,neighbors,road_s):
+        """Refresh an already prepared original direction after SDK lane switch.
+
+        Do not infer A->B permission from B->A. The original A binding must
+        already exist and its native marking is freshly probed in the shared
+        binder budget. No old dynamic observation is retained here.
+        """
+        result=[]
+        for item in neighbors:
+            if (item.get('geometry_valid') is not True or item.get('shared_boundary_verified') is not True
+                    or item.get('same_direction') is not True
+                    or str(item.get('lane_type','unknown')).lower().split('.')[-1]!='driving'
+                    or type(item.get('native_sample_reversed')) is not bool
+                    or item.get('side') not in ('left','right')
+                    or not lane.lane_type_valid):
+                continue
+            source=LaneContext()
+            source.lane_id=item['lane_id']
+            for key in ('center_line','left_boundary','right_boundary'):
+                setattr(source,key,item[key])
+            side='left' if item['side']=='right' else 'right'
+            native_side=('right' if side=='left' else 'left') if item['native_sample_reversed'] else side
+            reverse=dict(source_lane_id=source.lane_id,lane_id=lane.lane_id,side=side,
+                geometry_valid=True,shared_boundary_verified=True,same_direction=True,
+                lane_type=lane.lane_type,left_boundary=copy.deepcopy(lane.left_boundary),right_boundary=copy.deepcopy(lane.right_boundary),
+                marking_observation=dict(native_side=native_side))
+            self._markings(reverse,source,road_s,defer_native=True)
+            item['crossing_to_current']=reverse
+            result.append((source,reverse))
+        return result
+
+    def _markings(self,item,lane,road_s,defer_native=False):
         item["marking_scope"] = "road_s_intervals"
         item["crossing_range_verified"] = False
         item["crossing_geometry_bound"] = False
@@ -86,6 +120,10 @@ class ManeuverMap(object):
             item["marking_intervals_road_s"] = intervals
             item["marking_map_digest"] = self.digest
             active = next(v for v in intervals if v["road_s_start_m"]<=road_s<v["road_s_end_m"])
+            if defer_native:
+                item.update(marking_semantics_verified=False,crossing_allowed_at_ego=False,
+                            crossing_scope_reason='SOURCE_NATIVE_RECHECK_REQUIRED')
+                return
             native = item.get("marking_observation",{})
             sdk_type = str(native.get("type","unknown")).lower().split(".")[-1]
             sdk_offset = native.get("section_s_offset_m")

@@ -216,37 +216,80 @@ class CrossingRanges(object):
     def clear(self):
         self.jobs.clear()
 
-    def observe(self,ego,lane,items,document,digest,hdmap):
+    def observe(self,ego,lane,items,document,digest,hdmap,prior_sources=()):
         deadline,steps,pending = self.clock()+MAX_FRAME_SECONDS,0,[]
-        for item in items:
+        # Refresh prepared original directions before preparing the new SDK
+        # current-lane directions. Both still share the same bounded budget.
+        directed=[(source,item,True) for source,item in prior_sources]+[(lane,item,False) for item in items]
+        for source,item,prior_source in directed:
             item.update(crossing_ranges_world=[],crossing_boundary_window={},crossing_range_verified=False,
                         crossing_geometry_bound=False)
             if (item.get("geometry_valid") is not True or item.get("shared_boundary_verified") is not True
-                    or item.get("same_direction") is not True or item.get("marking_semantics_verified") is not True
+                    or item.get("same_direction") is not True
+                    or (not prior_source and item.get("marking_semantics_verified") is not True)
                     or str(item.get("lane_type","unknown")).lower().split(".")[-1]!="driving"):
                 continue
             try:
                 side = item["side"]
-                source_boundaries=dict(left=points3(lane.left_boundary),right=points3(lane.right_boundary))
+                source_boundaries=dict(left=points3(source.left_boundary),right=points3(source.right_boundary))
                 current = source_boundaries[side]
                 neighbor = points3(item["right_boundary"] if side=="left" else item["left_boundary"])
                 native_side = item.get("marking_observation",{}).get("native_side")
                 if native_side not in ("left","right"):
                     raise ValueError("NATIVE_SHARED_MARKING_SIDE_UNAVAILABLE")
-                key = (id(hdmap),digest,lane.lane_id,item["lane_id"],native_side,
+                key = (id(hdmap),digest,source.lane_id,item["lane_id"],native_side,
                        source_boundaries['left'],source_boundaries['right'],neighbor)
                 job = self.jobs.get(key)
                 at = project_polyline(current,ego.x,ego.y)
                 if not projection_within_polyline(at,len(current)):
                     raise ValueError("EGO_OUTSIDE_SHARED_BOUNDARY")
+                if prior_source:
+                    if job is None:
+                        raise ValueError('ORIGINAL_DIRECTION_BINDING_UNAVAILABLE')
+                    if steps+2>MAX_ATOMIC_STEPS or self.clock()>=deadline:
+                        raise ValueError('SOURCE_NATIVE_RECHECK_BUDGET')
+                    # Query the original border, as in _Job._build; ego can
+                    # already be outside its old lane. Requery road-s there
+                    # rather than borrowing the target lane's current road-s.
+                    index,ratio=at['index'],at['ratio']
+                    a,b=current[index:index+2]
+                    point=tuple(a[k]+ratio*(b[k]-a[k]) for k in range(3))
+                    road,section,unused=document.lane(source.lane_id)
+                    native_point=hdmap.pySimPoint3D(*point)
+                    steps+=1
+                    st=hdmap.getRoadST(hdmap.pySimString(road['id']),native_point)
+                    at_s=getattr(st,'s',None)
+                    if not (getattr(st,'exists',False) is True and number(at_s)
+                            and section['start_m']<=at_s<section['end_m']):
+                        raise ValueError('SOURCE_NATIVE_ROAD_S_UNVERIFIED')
+                    if self.clock()>=deadline:
+                        raise ValueError('SOURCE_NATIVE_RECHECK_BUDGET')
+                    steps+=1
+                    observed=hdmap.getRoadMark(native_point,
+                                               hdmap.pySimString(source.lane_id))
+                    if self.clock()>=deadline:
+                        raise ValueError('SOURCE_NATIVE_RECHECK_BUDGET')
+                    mark=getattr(observed,native_side,None)
+                    active=next((v for v in item.get('marking_intervals_road_s',[])
+                                 if number(at_s) and v['road_s_start_m']<=at_s<v['road_s_end_m']),None)
+                    offset=getattr(mark,'sOffset',None)
+                    if not (getattr(observed,'exists',False) is True and active is not None
+                            and active['semantic_verified'] is True and number(offset)
+                            and _sdk_text(getattr(mark,'type','unknown'))==active['type']
+                            and abs(offset-(active['road_s_start_m']-section['start_m']))<.001):
+                        raise ValueError('SOURCE_NATIVE_MARKING_UNVERIFIED')
+                    item['marking_semantics_verified']=True
+                    item['crossing_allowed_at_source_probe']=bool(active['crossing_permitted'])
+                    item['source_marking_recheck']=dict(point_world=point,road_s_m=float(at_s),
+                        native_side=native_side,model='original_border_projection_v1')
                 total = length3(current)
                 replace = (job is None or (job.iterator is None and job.result is None and self.clock()>=job.retry_after)
                     or (job is not None and (at["s"]<job.window_start or at["s"]>job.window_end
                         or (job.result is not None and at["s"]>job.window_end-40. and job.window_end<total-1e-6))))
                 if replace:
                     previous = job.result if job is not None and job.result is not None else (job.previous if job is not None else None)
-                    road,section,unused = document.lane(lane.lane_id)
-                    job = _Job(hdmap,lane.lane_id,road,section,current,neighbor,native_side,
+                    road,section,unused = document.lane(source.lane_id)
+                    job = _Job(hdmap,source.lane_id,road,section,current,neighbor,native_side,
                                item["marking_intervals_road_s"],ego,self.clock,side,source_boundaries)
                     job.previous = previous
                     self.jobs[key] = job

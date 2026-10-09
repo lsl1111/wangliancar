@@ -231,7 +231,8 @@ class RouteManager(object):
                 if not width.exists or not math.isfinite(float(width.width)) or width.width <= .1:
                     raise ValueError("neighbor width unavailable")
                 item.update(center_line=center,left_boundary=left,right_boundary=right,
-                            width_m=float(width.width),geometry_valid=True,lane_type=kind,reason="geometry_observed")
+                            width_m=float(width.width),geometry_valid=True,lane_type=kind,
+                            native_sample_reversed=bool(reversed_sample),reason="geometry_observed")
                 try:
                     a,b = tuple(int(v) for v in lane.lane_id.split("_")),tuple(int(v) for v in identity.split("_"))
                     item["direction_verified"] = len(a)==len(b)==3 and a[:2]==b[:2] and a[2]!=0 and b[2]!=0
