@@ -13,6 +13,7 @@ from core.region_geometry import (convex_polygon, inside, intersects, hull, rect
                                   circle_intersects,intersect_convex)
 from core.validation import number
 from perception.sensor_visibility import SensorVisibility
+from perception.sensor_pose_history import SensorPoseHistory
 from perception.traffic_geometry import signal_reference, stop_line_position
 
 
@@ -65,6 +66,13 @@ def _same_plane(raw, z):
                            and abs(v[2]-z)<=.1 for v in raw))
 
 
+def _plane_coverage(raw,coverage):
+    # Compare directly to the original visibility pose, not transitively via
+    # the current pose: two independent tolerances must not add up to .2 m.
+    return [v for v in coverage if number(v.get("reference_z_m"))
+            and _same_plane(raw,v["reference_z_m"])]
+
+
 def _bounds(region):
     return (min(v[0] for v in region),min(v[1] for v in region),
             max(v[0] for v in region),max(v[1] for v in region))
@@ -90,11 +98,13 @@ class ManeuverEnvironmentBuilder(object):
         self.visibility = SensorVisibility(getattr(config,"sensor_visibility_file",""))
         self.vehicle_id = getattr(config,"vehicle_id","0")
         self.sensor_timeout_ms = getattr(config,"sensor_timeout_ms",500)
+        self.pose_history = SensorPoseHistory(self.vehicle_id,self.sensor_timeout_ms)
 
     def build(self, perception):
         env = ManeuverEnvironment().bind(perception)
         env.case_id,env.task_id,env.scene_id = perception.case_id,perception.task_id,perception.scene_id
         now = self.clock()
+        self.pose_history.observe(perception,now)
         gps = perception.source_status.get("gps",{})
         gps_age = gps.get("age_ms",-1) if isinstance(gps,dict) else -1
         if (perception.valid is not True or not perception.ego.valid
@@ -119,31 +129,39 @@ class ManeuverEnvironmentBuilder(object):
             env.dynamic_observed_at_s = now-max(gps_age,age)/1000.
             env.dynamic_valid_until = min(env.valid_until,now+(self.sensor_timeout_ms-age)/1000.)
         env.status["objects"] = dict(usable=complete,reason=reason,source=perception.target_source)
+        pose,pose_reason = None,"current_frame_pose"
+        if complete and perception.targets_frame_id != perception.frame_id:
+            pose,pose_reason = self.pose_history.select(perception,now)
+            if pose is not None:
+                env.dynamic_observed_at_s=min(env.dynamic_observed_at_s,pose["observed_at_s"])
+                env.dynamic_valid_until=min(env.dynamic_valid_until,pose["valid_until_s"])
         for obj in env.objects:
             obj["evidence"] = _evidence(env,perception.target_source,"sensor",False)
-        coverage,coverage_reason = self.visibility.regions(perception,self.vehicle_id) if complete else ([],reason)
-        if perception.targets_frame_id != perception.frame_id:
-            # A current GPS pose cannot locate a body-frame visibility model
-            # observed on an older Sensor frame. No pose-history producer yet.
-            coverage,coverage_reason = [],"sensor_pose_history_unavailable"
+        coverage,coverage_reason = self.visibility.regions(perception,self.vehicle_id,
+            None if pose is None else pose["ego"]) if complete else ([],reason)
+        if complete and perception.targets_frame_id != perception.frame_id and pose is None:
+            coverage,coverage_reason = [],pose_reason
         if coverage:
             # Retain original source observation time, never rejuvenate it with
             # the new GPS frame. A regressed/unsynchronized stream is rejected
             # upstream and cannot create a fresh visibility certificate here.
-            observed = now-max(gps_age,age)/1000.
+            observed = env.dynamic_observed_at_s
             for record in coverage:
                 record.update(_evidence(env,perception.target_source,"sensor",True))
                 record["observed_at_s"] = observed
                 record["source_frame_id"] = perception.targets_frame_id
+                record["pose_frame_id"] = perception.targets_frame_id
+                record["pose_source"] = pose_reason
             env.coverage_regions = coverage
-        env.status["coverage"] = dict(verified=bool(coverage),reason=coverage_reason)
+        env.status["coverage"] = dict(verified=bool(coverage),reason=coverage_reason,pose_reason=pose_reason)
         try:
             if hasattr(self.route_manager,"read_neighbor_lanes"):
                 env.neighbor_lanes = self.route_manager.read_neighbor_lanes(perception.ego,perception.lane)
             for lane in env.neighbor_lanes:
                 outline = lane["left_boundary"]+list(reversed(lane["right_boundary"]))
-                verified = bool(lane["geometry_valid"] and outline and complete and _covered(outline,coverage)
-                    and _same_plane(lane["center_line"]+lane["left_boundary"]+lane["right_boundary"],perception.ego.z))
+                raw=lane["center_line"]+lane["left_boundary"]+lane["right_boundary"]
+                verified = bool(lane["geometry_valid"] and outline and complete
+                    and _covered(outline,_plane_coverage(raw,coverage)) and _same_plane(raw,perception.ego.z))
                 lane["dynamic_coverage_verified"] = verified
                 lane["objects"] = copy.deepcopy(env.objects)
                 lane["evidence"] = _evidence(env,perception.target_source if verified else "hdmap",
@@ -185,12 +203,14 @@ class ManeuverEnvironmentBuilder(object):
             # The enclosing circle includes every heading, even an unknown one.
             radius=.5*math.hypot(obj["length"],obj["width"])
             objects.append((obj,(obj["x"]-radius,obj["y"]-radius,obj["x"]+radius,obj["y"]+radius)))
-        views=[(v["polygon"],_bounds(v["polygon"])) for v in coverage]
         for region in env.road_regions:
             valid = region.get("geometry_valid") is True and region.get("drivable_verified") is True
             polygon,cells = region.get("polygon",[]),region.get("convex_cells",[])
-            planar = _same_plane(region.get("left_boundary",[])+region.get("right_boundary",[]),p.ego.z)
-            verified = bool(valid and complete and planar and polygon and _covered(polygon,coverage))
+            raw=region.get("left_boundary",[])+region.get("right_boundary",[])
+            planar = _same_plane(raw,p.ego.z)
+            region_coverage=_plane_coverage(raw,coverage)
+            views=[(v["polygon"],_bounds(v["polygon"])) for v in region_coverage]
+            verified = bool(valid and complete and planar and polygon and _covered(polygon,region_coverage))
             hits=set()
             if valid:
                 for index,cell in enumerate(cells):
@@ -235,7 +255,7 @@ class ManeuverEnvironmentBuilder(object):
                 region = convex_polygon([tuple(v[:2]) for v in record["boundary_knots"]])
                 item.update(boundary=region,geometry_valid=True)
                 hits = [obj["id"] for obj in env.objects if _touches(obj,region)]
-                verified = complete and _covered(region,coverage) and _same_plane(record["boundary_knots"],p.ego.z)
+                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage)) and _same_plane(record["boundary_knots"],p.ego.z)
                 # Observing an obstacle proves occupancy without claiming the
                 # remainder of the space was observed. Empty needs full coverage.
                 if hits:
@@ -275,7 +295,7 @@ class ManeuverEnvironmentBuilder(object):
                 item.update(polygon=region,geometry_valid=True)
                 item["object_ids"] = [o["id"] for o in env.objects if _touches(o,region)]
                 item["predicted_object_ids"] = [o["id"] for o in env.objects if _touches(o,region,3.)]
-                verified = complete and _covered(region,coverage) and _same_plane(record["boundary_knots"],p.ego.z)
+                verified = complete and _covered(region,_plane_coverage(record["boundary_knots"],coverage)) and _same_plane(record["boundary_knots"],p.ego.z)
                 item["coverage_verified"] = verified
                 item["occupancy"] = ("occupied" if item["object_ids"] else "clear" if verified else "unknown")
                 item["evidence"] = _evidence(env,p.target_source,"verified_fusion",verified)

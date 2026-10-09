@@ -18,7 +18,7 @@ class SensorVisibility(object):
         self.profiles = []
         self.reason = "visibility_model_not_configured"
 
-    def regions(self, perception, vehicle_id):
+    def regions(self, perception, vehicle_id, pose=None):
         if not self.filename:
             return [],self.reason
         try:
@@ -71,11 +71,11 @@ class SensorVisibility(object):
                     local = convex_polygon(profile.get("body_region_m"))
                     if any(math.hypot(x,y)>250 for x,y in local):
                         raise ValueError("visibility region outside supported range")
-                    ego = perception.ego
+                    ego = perception.ego if pose is None else pose
                     c,s = math.cos(ego.heading),math.sin(ego.heading)
                     world = [(ego.x+x*c-y*s,ego.y+x*s+y*c) for x,y in local]
                     records.append(dict(sensor_id=sensor_id,source=source,source_kind="sensor",
-                        polygon=world,complete_detections=True,
+                        polygon=world,reference_z_m=ego.z,complete_detections=True,
                         verification_reference=profile["verification_reference"]))
             return records,"verified_model_matched" if records else "visibility_model_scope_or_installation_mismatch"
         except (OSError,ValueError,TypeError,KeyError,OverflowError) as exc:
