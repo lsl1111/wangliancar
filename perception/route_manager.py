@@ -264,6 +264,7 @@ class RouteManager(object):
                         extent = [v if type(v) in (int,float) and math.isfinite(v) and v>=0 else None for v in extent]
                         item["marking_observation"] = dict(type=_sdk_string(value.type),
                             section_s_offset_m=extent[0],native_length_m=extent[1],
+                            native_side=native_side,
                             semantics="native_extent_not_crossing_authority")
             except (AttributeError,TypeError,ValueError,OverflowError,RuntimeError) as exc:
                 item["reason"] = "NEIGHBOR_QUERY:"+str(exc)
@@ -365,6 +366,14 @@ class RouteManager(object):
         )
         lane.valid = project_polyline(lane.center_line, ego.x, ego.y) is not None
         lane.source = "hdmap"
+        if hasattr(hdmap,"getLaneType"):
+            try:
+                kind = hdmap.getLaneType(native_id)
+                if getattr(kind,"exists",False):
+                    lane.lane_type = _sdk_string(kind.laneType)
+                    lane.lane_type_valid = lane.lane_type.lower().split(".")[-1]!="unknown"
+            except (AttributeError,TypeError,ValueError,RuntimeError):
+                pass
         if lane.valid:
             self._extend_reference(lane, ego, link_info, reversed_direction)
         return lane

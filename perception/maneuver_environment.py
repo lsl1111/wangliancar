@@ -9,7 +9,8 @@ import time
 
 from core.geometry import project_polyline, swept_path_distance
 from core.interfaces import ManeuverEnvironment
-from core.region_geometry import convex_polygon, inside, intersects, hull, rectangle, circle_intersects
+from core.region_geometry import (convex_polygon, inside, intersects, hull, rectangle,
+                                  circle_intersects,intersect_convex)
 from core.validation import number
 from perception.sensor_visibility import SensorVisibility
 from perception.traffic_geometry import signal_reference, stop_line_position
@@ -62,6 +63,16 @@ def _same_plane(raw, z):
     # of a multi-layer map into an empty region on the observed level.
     return bool(raw and all(isinstance(v,(tuple,list)) and len(v)>=3 and number(v[2])
                            and abs(v[2]-z)<=.1 for v in raw))
+
+
+def _bounds(region):
+    return (min(v[0] for v in region),min(v[1] for v in region),
+            max(v[0] for v in region),max(v[1] for v in region))
+
+
+def _bounds_overlap(left,right):
+    return not (left[2]<right[0]-1e-8 or right[2]<left[0]-1e-8
+                or left[3]<right[1]-1e-8 or right[3]<left[1]-1e-8)
 
 
 def _evidence(environment, source, source_kind, verified=False):
@@ -145,6 +156,7 @@ class ManeuverEnvironmentBuilder(object):
             try:
                 env.map_semantics,env.junctions = self.route_manager.read_maneuver_map(
                     perception.ego,perception.lane,env.neighbor_lanes)
+                env.road_regions = env.map_semantics.pop("road_regions",[])
                 map_source = "sdk_matched_opendrive" if env.map_semantics.get("semantic_verified") is True else "unavailable"
                 env.map_semantics["evidence"] = _evidence(env,map_source,"map",False)
                 for neighbor in env.neighbor_lanes:
@@ -155,11 +167,63 @@ class ManeuverEnvironmentBuilder(object):
             except Exception as exc:
                 env.map_semantics = dict(verified=False,reason="MAP_SEMANTICS_QUERY:"+type(exc).__name__)
                 env.junctions = []
+                env.road_regions = []
+        self._roads(perception,env,complete,coverage)
         self._parking(perception,env,complete,coverage)
         self._crossings(perception,env,complete,coverage)
         return env
 
+    def _roads(self,p,env,complete,coverage):
+        """Only intersect already verified road cells with actual visibility.
+
+        A clear cell is current occupancy evidence, not crossing legality or a
+        future collision/traffic-rule certificate. No union hull is produced.
+        """
+        complete = complete and self.clock()<env.dynamic_valid_until
+        objects=[]
+        for obj in env.objects:
+            # The enclosing circle includes every heading, even an unknown one.
+            radius=.5*math.hypot(obj["length"],obj["width"])
+            objects.append((obj,(obj["x"]-radius,obj["y"]-radius,obj["x"]+radius,obj["y"]+radius)))
+        views=[(v["polygon"],_bounds(v["polygon"])) for v in coverage]
+        for region in env.road_regions:
+            valid = region.get("geometry_valid") is True and region.get("drivable_verified") is True
+            polygon,cells = region.get("polygon",[]),region.get("convex_cells",[])
+            planar = _same_plane(region.get("left_boundary",[])+region.get("right_boundary",[]),p.ego.z)
+            verified = bool(valid and complete and planar and polygon and _covered(polygon,coverage))
+            hits=set()
+            if valid:
+                for index,cell in enumerate(cells):
+                    bounds=region.get("cell_bounds_xy",[])
+                    box=bounds[index] if index<len(bounds) else _bounds(cell)
+                    candidates=[obj for obj,object_box in objects if _bounds_overlap(box,object_box)]
+                    touching=[obj for obj in candidates if _touches(obj,cell)]
+                    hits.update(obj["id"] for obj in touching)
+                    if not complete or not planar: continue
+                    for visible,visible_box in views:
+                        if not _bounds_overlap(box,visible_box): continue
+                        full=all(inside(point,visible) for point in cell)
+                        clipped=list(cell) if full else intersect_convex(cell,visible)
+                        if not clipped or (bool(touching) if full else any(_touches(obj,clipped) for obj in candidates)):
+                            continue
+                        env.free_regions.append(dict(kind="lane",lane_id=region["lane_id"],
+                            cell_index=index,polygon=clipped,geometry_model=region["geometry_model"],
+                            occupancy_time="source_observation",crossing_permission="separate_marking_facts",
+                            evidence=_evidence(env,p.target_source,"verified_fusion",True)))
+            hits=sorted(hits)
+            region.update(coverage_verified=verified,object_ids=hits,
+                          occupancy="occupied" if hits else "clear" if verified else "unknown",
+                          geometry_evidence=_evidence(env,"sdk_matched_opendrive","map",False),
+                          evidence=_evidence(env,p.target_source,"verified_fusion",verified))
+            for neighbor in env.neighbor_lanes:
+                if neighbor["lane_id"]==region["lane_id"] and region.get("geometry_valid") is True:
+                    neighbor["local_geometry"] = copy.deepcopy({k:region[k] for k in
+                        ("center_line","left_boundary","right_boundary","polygon","center_arc_start_m","center_arc_end_m")})
+                    neighbor["local_coverage_verified"] = verified
+                    neighbor["local_drivable_verified"] = region["drivable_verified"]
+
     def _parking(self,p,env,complete,coverage):
+        complete = complete and self.clock()<env.dynamic_valid_until
         env.status["parking_spaces"] = "observed" if p.parking_spaces_valid else "map_geometry_unusable"
         if not p.parking_spaces_valid:
             return
@@ -190,6 +254,7 @@ class ManeuverEnvironmentBuilder(object):
             env.parking_spaces.append(item)
 
     def _crossings(self,p,env,complete,coverage):
+        complete = complete and self.clock()<env.dynamic_valid_until
         env.status["crossing_regions"] = dict(geometry_scope="signal_associated_lanes",
             coverage_complete=False,right_of_way="UNKNOWN",exit_geometry="unavailable")
         if not p.map_crosswalks_valid:

@@ -131,6 +131,8 @@ class LaneContext(object):
         self.lane_width_valid = False
         self.speed_limit = -1.0
         self.speed_limit_source = "unavailable"
+        self.lane_type = "unknown"
+        self.lane_type_valid = False
         self.predecessor_lane_ids = []
         self.successor_lane_ids = []
         # HD-map reference in the travel direction, including verified unique
@@ -199,6 +201,7 @@ class ManeuverEnvironment(FrameOutput):
         self.objects = []
         self.coverage_regions = []
         self.free_regions = []
+        self.road_regions = []
         self.parking_spaces = []
         self.crossing_regions = []
         # Static semantic facts from the exact loaded OpenDRIVE document.

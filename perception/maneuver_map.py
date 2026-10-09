@@ -5,11 +5,15 @@ import math
 from core.geometry import project_polyline
 from core.route_segments import verified_spans
 from perception.opendrive_semantics import OpenDriveSemantics,lane_identity
+from perception.crossing_ranges import CrossingRanges
+from perception.road_regions import RoadRegions
 
 
 class ManeuverMap(object):
     def __init__(self,adapter):
         self.adapter,self.document,self.digest,self.parse_reason = adapter,None,None,"DOCUMENT_UNAVAILABLE"
+        self.crossing_ranges = CrossingRanges()
+        self.road_regions = RoadRegions()
         self._read()  # Parse at route-manager construction, before driving loop.
 
     def _read(self):
@@ -24,6 +28,8 @@ class ManeuverMap(object):
             if not isinstance(digest,str) or len(digest)!=32:
                 return dict(verified=False,reason="MAP_DIGEST_UNAVAILABLE")
             if self.digest!=digest:
+                self.crossing_ranges.clear()
+                self.road_regions.clear()
                 self.document,self.digest,self.parse_reason = None,digest,"DOCUMENT_INVALID_OR_UNSUPPORTED"
                 try:
                     self.document = OpenDriveSemantics(data)
@@ -40,8 +46,12 @@ class ManeuverMap(object):
     def observe(self,ego,lane,neighbors):
         for item in neighbors:
             item.update(marking_intervals_road_s=[],marking_semantics_verified=False,
-                        crossing_range_verified=False,crossing_geometry_bound=False)
+                        crossing_range_verified=False,crossing_geometry_bound=False,
+                        travel_direction_verified=False,travel_matches_declared_direction=False,
+                        crossing_ranges_world=[],crossing_boundary_window={})
             item.pop("marking_map_digest",None)
+            for key in ("local_geometry","local_coverage_verified","local_drivable_verified"):
+                item.pop(key,None)
         metadata = self._read()
         if metadata.get("verified") is not True or metadata.get("semantic_verified") is not True:
             return metadata,[]
@@ -60,6 +70,9 @@ class ManeuverMap(object):
                             coordinate_system="opendrive_road_s")
             for item in neighbors:
                 self._markings(item,lane,road_s)
+            metadata["boundary_binding_budget"] = self.crossing_ranges.observe(
+                ego,lane,neighbors,self.document,self.digest,hdmap)
+            metadata["road_regions"] = self.road_regions.observe(ego,lane,neighbors,self.document,self.digest)
         except (AttributeError,ValueError,TypeError,KeyError,IndexError,OverflowError,RuntimeError):
             metadata.update(geometry_bound=False,geometry_reason="ROAD_S_OR_LANE_SECTION_UNVERIFIED")
         return metadata,self._junctions(ego,lane,metadata.get("geometry_bound") is True)
